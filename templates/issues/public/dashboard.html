@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block title %}Јавна статистика · Sredi{% endblock %}
+{% block content %}
+<section class="d-flex flex-column flex-lg-row justify-content-between gap-4 align-items-lg-end mb-4">
+  <div>
+    <p class="text-success fw-semibold text-uppercase small ls-2 mb-2">Јавна отчетност</p>
+    <h1 class="display-6 fw-bold text-balance mb-2">Статистика · {{ municipality.name }}</h1>
+    <p class="text-secondary mb-0 col-lg-10">Преглед на пријавите без опис, фотографии или контакт податоци. Јавно се прикажуваат само безбедни информации.</p>
+  </div>
+  <a class="btn btn-success btn-lg px-4 py-2 fw-semibold" href="{% url 'submit_issue' municipality.slug %}">
+    <i class="bi bi-plus-circle me-2" aria-hidden="true"></i>Пријави проблем
+  </a>
+</section>
+<section class="row g-3 my-4">
+  <div class="col-6 col-lg-3">
+    <div class="card stat-card h-100">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-start">
+          <div>
+            <div class="fs-2 fw-bold text-success">{{ stats.total }}</div>
+            <div class="text-secondary small">Вкупно пријави</div>
+          </div>
+          <span class="icon-tile-sm rounded-circle bg-success-subtle text-success d-inline-flex align-items-center justify-content-center"><i class="bi bi-inboxes" aria-hidden="true"></i></span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-lg-3">
+    <div class="card stat-card h-100">
+      <div class="card-body">
+        <div class="fs-2 fw-bold text-primary">{{ stats.open }}</div>
+        <div class="text-secondary small">Активни</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-lg-3">
+    <div class="card stat-card h-100">
+      <div class="card-body">
+        <div class="fs-2 fw-bold text-success">{{ stats.resolved }}</div>
+        <div class="text-secondary small">Решени / затворени</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-lg-3">
+    <div class="card stat-card h-100">
+      <div class="card-body">
+        <div class="fs-2 fw-bold text-warning">{{ stats.pending }}</div>
+        <div class="text-secondary small">Чекаат проверка</div>
+      </div>
+    </div>
+  </div>
+</section>
+<section class="row g-4">
+  <div class="col-lg-6">
+    <div class="surface-card rounded-3 h-100">
+      <div class="p-4">
+        <h2 class="h5 fw-bold mb-3">По населено место</h2>
+        <div class="list-group list-group-flush">
+          {% for row in by_settlement %}
+            <div class="list-group-item d-flex justify-content-between align-items-center px-0 bg-transparent">
+              <span>{{ row.settlement__name }}</span>
+              <span class="badge text-bg-success rounded-pill">{{ row.total }}</span>
+            </div>
+          {% empty %}
+            <p class="text-secondary mb-0">Нема податоци.</p>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-6">
+    <div class="surface-card rounded-3 h-100">
+      <div class="p-4">
+        <h2 class="h5 fw-bold mb-3">По категорија</h2>
+        <div class="list-group list-group-flush">
+          {% for row in by_category %}
+            <div class="list-group-item d-flex justify-content-between align-items-center px-0 bg-transparent">
+              <span>{{ row.category__name }}</span>
+              <span class="badge text-bg-success rounded-pill">{{ row.total }}</span>
+            </div>
+          {% empty %}
+            <p class="text-secondary mb-0">Нема податоци.</p>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+<section class="surface-card rounded-3 mt-4">
+  <div class="p-4">
+    <div class="d-flex flex-column flex-md-row justify-content-between gap-2 mb-3">
+      <div>
+        <h2 class="h5 fw-bold mb-1">Јавен регистар на пријави</h2>
+        <p class="text-secondary small mb-0">Скратен приказ без чувствителни податоци.</p>
+      </div>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-hover table-clean align-middle mb-0">
+        <thead>
+          <tr>
+            <th>Датум</th>
+            <th>Населено место</th>
+            <th>Категорија</th>
+            <th>Статус</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for issue in public_issues %}
+            <tr>
+              <td>{{ issue.submitted_at|date:"d.m.Y H:i" }}</td>
+              <td>{{ issue.settlement.name }}</td>
+              <td>{{ issue.category.name }}</td>
+              <td>
+                <span class="badge rounded-pill {% if issue.status == 'resolved' or issue.status == 'closed' %}text-bg-success{% elif issue.status == 'pending_triage' %}text-bg-warning{% elif issue.status == 'not_jurisdiction' or issue.status == 'duplicate' %}text-bg-secondary{% else %}text-bg-primary{% endif %}">
+                  {{ issue.get_status_display }}
+                </span>
+              </td>
+            </tr>
+          {% empty %}
+            <tr><td colspan="4" class="text-secondary">Нема пријави.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+{% endblock %}

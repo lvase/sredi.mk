@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Најава · Opštinski Inbox{% endblock %}
+{% block content %}
+<section class="row justify-content-center align-items-center">
+  <div class="col-lg-5">
+    <div class="surface-card rounded-3 p-4 p-lg-5">
+      <p class="text-success fw-semibold text-uppercase small ls-2 mb-2">Opštinski Inbox</p>
+      <h1 class="h2 fw-bold">Најава за службени лица</h1>
+      <p class="text-secondary">Административен простор за прием, распределба и следење на граѓански пријави.</p>
+      <form method="post" class="vstack gap-3">
+        {% csrf_token %}
+        {{ form.as_p }}
+        <button class="btn btn-success btn-lg px-4" type="submit">
+          <i class="bi bi-box-arrow-in-right me-2" aria-hidden="true"></i>Најави се
+        </button>
+      </form>
+    </div>
+  </div>
+</section>
+{% endblock %}

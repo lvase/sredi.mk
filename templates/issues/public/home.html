@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Sredi · Пријави проблем{% endblock %}
+{% block content %}
+<section class="py-5 my-lg-4">
+  <div class="row align-items-center g-4">
+    <div class="col-lg-8">
+      <p class="text-success fw-semibold text-uppercase small ls-2 mb-2">Sredi · {{ municipality.name }}</p>
+      <h1 class="display-4 fw-bold text-dark mb-3">{{ municipality.name }}</h1>
+      <p class="lead text-secondary fw-light mb-0">Пријави проблем во населено место од оваа општина или провери ја јавната статистика.</p>
+      <div class="d-flex flex-wrap gap-2 mt-4">
+        <a class="btn btn-success btn-lg px-4 py-2 fw-semibold" href="{% url 'submit_issue' municipality.slug %}">
+          <i class="bi bi-plus-circle me-2" aria-hidden="true"></i>Пријави проблем
+        </a>
+        <a class="btn btn-outline-success btn-lg px-4 py-2 fw-semibold" href="{% url 'public_dashboard' municipality.slug %}">
+          <i class="bi bi-bar-chart me-2" aria-hidden="true"></i>Види статистика
+        </a>
+        <a class="btn btn-outline-secondary btn-lg px-4 py-2 fw-semibold" href="{% url 'track_issue' municipality.slug %}">
+          <i class="bi bi-search me-2" aria-hidden="true"></i>Следи пријава
+        </a>
+      </div>
+    </div>
+    <div class="col-lg-4">
+      <div class="card border-0 shadow-sm">
+        <div class="card-body p-4">
+          <div class="d-flex align-items-center gap-3 mb-3">
+            <span class="icon-tile rounded-circle bg-success-subtle text-success d-inline-flex align-items-center justify-content-center">
+              <i class="bi bi-shield-check fs-4" aria-hidden="true"></i>
+            </span>
+            <h2 class="h5 fw-bold mb-0">Јавен статус</h2>
+          </div>
+          <p class="text-secondary mb-0">Секоја пријава добива код за следење и се обработува од службеници на избраната општина.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+<section class="row g-4 pb-4">
+  <div class="col-md-4">
+    <div class="surface-card rounded-3 p-4 h-100">
+      <span class="icon-tile-sm rounded-circle bg-success-subtle text-success d-inline-flex align-items-center justify-content-center mb-3">
+        <i class="bi bi-phone" aria-hidden="true"></i>
+      </span>
+      <h2 class="h6 fw-bold">Брза пријава</h2>
+      <p class="text-secondary small mb-0">Граѓаните поднесуваат проблем без креирање профил и добиваат код за следење.</p>
+    </div>
+  </div>
+  <div class="col-md-4">
+    <div class="surface-card rounded-3 p-4 h-100">
+      <span class="icon-tile-sm rounded-circle bg-primary-subtle text-primary d-inline-flex align-items-center justify-content-center mb-3">
+        <i class="bi bi-people" aria-hidden="true"></i>
+      </span>
+      <h2 class="h6 fw-bold">Службена обработка</h2>
+      <p class="text-secondary small mb-0">Општинските службеници гледаат само пријави од својата општина и работат по статуси.</p>
+    </div>
+  </div>
+  <div class="col-md-4">
+    <div class="surface-card rounded-3 p-4 h-100">
+      <span class="icon-tile-sm rounded-circle bg-warning-subtle text-warning-emphasis d-inline-flex align-items-center justify-content-center mb-3">
+        <i class="bi bi-graph-up-arrow" aria-hidden="true"></i>
+      </span>
+      <h2 class="h6 fw-bold">Јавна отчетност</h2>
+      <p class="text-secondary small mb-0">Статистиката покажува напредок без да објавува чувствителни информации.</p>
+    </div>
+  </div>
+</section>
+{% endblock %}

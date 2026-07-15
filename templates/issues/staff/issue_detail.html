@@ -1,0 +1,233 @@
+{% extends "base.html" %}
+{% block title %}{{ issue.tracking_code }} · Opštinski Inbox{% endblock %}
+{% block content %}
+<section class="d-flex flex-column flex-lg-row justify-content-between gap-4 align-items-lg-start mb-4">
+  <div>
+    <a class="link-secondary text-decoration-none small" href="{% url 'staff_dashboard' %}">
+      <i class="bi bi-arrow-left me-1" aria-hidden="true"></i>Назад кон работна табла
+    </a>
+    <p class="text-success fw-semibold text-uppercase small ls-2 mt-3 mb-2">{{ issue.tracking_code }}</p>
+    <h1 class="display-6 fw-bold text-balance mb-2">{{ issue.title }}</h1>
+    <p class="text-secondary mb-0">{{ issue.municipality.name }} · {{ issue.settlement.name }} · {{ issue.category.name }}</p>
+  </div>
+  <div class="d-flex flex-wrap gap-2">
+    <span class="badge fs-6 rounded-pill {% if issue.status == 'resolved' or issue.status == 'closed' %}text-bg-success{% elif issue.status == 'pending_triage' %}text-bg-warning{% elif issue.status == 'rejected_spam' %}text-bg-danger{% elif issue.status == 'not_jurisdiction' or issue.status == 'duplicate' %}text-bg-secondary{% else %}text-bg-primary{% endif %}">
+      {{ issue.get_status_display }}
+    </span>
+    <span class="badge fs-6 rounded-pill {% if issue.priority == 'urgent' %}text-bg-danger{% elif issue.priority == 'high' %}text-bg-warning{% elif issue.priority == 'low' %}text-bg-secondary{% else %}text-bg-light border text-dark{% endif %}">
+      {{ issue.get_priority_display }}
+    </span>
+  </div>
+</section>
+
+<section class="row g-4">
+  <div class="col-xl-8">
+    <section class="surface-card rounded-3 p-4 p-lg-5 mb-4">
+      <div class="d-flex gap-3 align-items-center mb-4">
+        <span class="icon-tile rounded-circle bg-success-subtle text-success d-inline-flex align-items-center justify-content-center">
+          <i class="bi bi-card-text fs-4" aria-hidden="true"></i>
+        </span>
+        <h2 class="h4 fw-bold mb-0">Опис на пријавата</h2>
+      </div>
+      <p class="mb-4">{{ issue.description|linebreaksbr }}</p>
+      <div class="row g-3">
+        <div class="col-md-6">
+          <div class="border rounded-3 p-3 h-100 bg-light">
+            <p class="text-secondary small mb-1">Локација</p>
+            <p class="fw-semibold mb-0">{{ issue.location_text }}</p>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="border rounded-3 p-3 h-100 bg-light">
+            <p class="text-secondary small mb-1">Поднесено</p>
+            <p class="fw-semibold mb-0">{{ issue.submitted_at|date:"d.m.Y H:i" }}</p>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="border rounded-3 p-3 h-100 bg-light">
+            <p class="text-secondary small mb-1">Сомнителност</p>
+            <span class="badge {% if issue.suspicious_score >= 50 %}text-bg-danger{% elif issue.suspicious_score %}text-bg-warning{% else %}text-bg-light border text-dark{% endif %}">{{ issue.suspicious_score }}/100</span>
+          </div>
+        </div>
+      </div>
+      {% if issue.suspicious_reasons %}
+        <div class="alert alert-warning mt-3 mb-0">
+          <h3 class="h6 fw-bold">Причини за означување</h3>
+          <ul class="mb-0">
+            {% for reason in issue.suspicious_reasons %}
+              <li>{{ reason.label }} <strong>+{{ reason.points }}</strong></li>
+            {% endfor %}
+          </ul>
+        </div>
+      {% else %}
+        <p class="small text-secondary mt-3 mb-0">Нема автоматски откриени сигнали за сомнителност.</p>
+      {% endif %}
+      {% if issue.attachments.exists %}
+        <div class="mt-4 pt-4 border-top">
+          <h3 class="h5 fw-bold mb-3">Фотографии</h3>
+          <div class="d-flex flex-wrap gap-3">
+            {% for attachment in issue.attachments.all %}
+              <a href="{% url 'api_staff_attachment' attachment.pk %}" class="d-block">
+                <img class="img-thumbnail object-fit-cover" style="width: 170px; height: 125px;" src="{% url 'api_staff_attachment' attachment.pk %}" alt="Фотографија">
+              </a>
+            {% endfor %}
+          </div>
+        </div>
+      {% endif %}
+    </section>
+
+    {% if can_add_comment %}
+      <section class="surface-card rounded-3 p-4 p-lg-5 mb-4">
+        <h2 class="h4 fw-bold mb-3">Коментари</h2>
+        <form method="post" action="{% url 'staff_add_comment' issue.pk %}" class="mb-4">
+          {% csrf_token %}
+          <label class="form-label" for="{{ comment_form.body.id_for_label }}">{{ comment_form.body.label }}</label>
+          {{ comment_form.body }}
+          {{ comment_form.body.errors }}
+          <div class="d-flex flex-column flex-sm-row justify-content-between gap-3 align-items-sm-center mt-3">
+            <div class="form-check">
+              {{ comment_form.is_internal }}
+              <label class="form-check-label" for="{{ comment_form.is_internal.id_for_label }}">{{ comment_form.is_internal.label }}</label>
+            </div>
+            <button class="btn btn-success px-4" type="submit">
+              <i class="bi bi-chat-dots me-2" aria-hidden="true"></i>Додај коментар
+            </button>
+          </div>
+        </form>
+        <div class="timeline border-top pt-4">
+          {% for comment in issue.comments.all %}
+            <div class="timeline-item">
+              <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
+                <strong>{{ comment.created_at|date:"d.m.Y H:i" }} · {{ comment.author.get_username }}</strong>
+                {% if comment.is_internal %}<span class="badge text-bg-secondary">Интерно</span>{% else %}<span class="badge text-bg-success">Јавно</span>{% endif %}
+              </div>
+              <p class="mb-0">{{ comment.body|linebreaksbr }}</p>
+            </div>
+          {% empty %}
+            <p class="text-secondary mb-0">Нема коментари.</p>
+          {% endfor %}
+        </div>
+      </section>
+    {% endif %}
+
+    <section class="surface-card rounded-3 p-4 p-lg-5 mb-4">
+      <h2 class="h4 fw-bold mb-3">Историја</h2>
+      <div class="timeline">
+        {% for event in issue.status_events.all %}
+          <div class="timeline-item">
+            <p class="small text-secondary mb-1">{{ event.created_at|date:"d.m.Y H:i" }}</p>
+            <p class="mb-1">{{ event.from_status|default:"-" }} → <strong>{{ event.get_to_status_display }}</strong></p>
+            {% if event.note %}<p class="text-secondary mb-0">{{ event.note|linebreaksbr }}</p>{% endif %}
+          </div>
+        {% empty %}
+          <p class="text-secondary mb-0">Нема историја.</p>
+        {% endfor %}
+      </div>
+    </section>
+  </div>
+
+  <div class="col-xl-4">
+    <div class="vstack gap-4">
+      <section class="surface-card rounded-3 p-4">
+        <h2 class="h5 fw-bold mb-3">Задолжување</h2>
+        <dl class="row mb-0">
+          <dt class="col-5 text-secondary fw-normal">Одделение</dt>
+          <dd class="col-7 fw-semibold">{{ issue.assigned_department|default:"Не е доделено" }}</dd>
+          <dt class="col-5 text-secondary fw-normal">Вработен</dt>
+          <dd class="col-7 fw-semibold">{{ issue.assigned_to|default:"Не е доделен" }}</dd>
+          <dt class="col-5 text-secondary fw-normal">Ажурирано</dt>
+          <dd class="col-7 fw-semibold mb-0">{{ issue.updated_at|date:"d.m.Y H:i" }}</dd>
+        </dl>
+      </section>
+
+      <section class="surface-card rounded-3 p-4">
+        <h2 class="h5 fw-bold mb-3">Контакт</h2>
+        {% if issue.is_anonymous %}
+          <p class="text-secondary mb-0">Анонимна пријава.</p>
+        {% else %}
+          <dl class="mb-0">
+            {% if issue.citizen_name %}<dt class="text-secondary fw-normal">Име</dt><dd>{{ issue.citizen_name }}</dd>{% endif %}
+            {% if issue.citizen_email %}<dt class="text-secondary fw-normal">Е-пошта</dt><dd>{{ issue.citizen_email }}</dd>{% endif %}
+            {% if issue.citizen_phone %}<dt class="text-secondary fw-normal">Телефон</dt><dd class="mb-0">{{ issue.citizen_phone }}</dd>{% endif %}
+          </dl>
+        {% endif %}
+      </section>
+
+      {% if can_update_issue %}
+        <section class="surface-card rounded-3 p-4">
+          <h2 class="h5 fw-bold mb-3">Ажурирај</h2>
+          <form method="post" action="{% url 'staff_update_issue' issue.pk %}" class="vstack gap-3">
+            {% csrf_token %}
+            <div>
+              <label class="form-label" for="{{ update_form.priority.id_for_label }}">{{ update_form.priority.label }}</label>
+              {{ update_form.priority }}
+            </div>
+            <div>
+              <label class="form-label" for="{{ update_form.assigned_department.id_for_label }}">{{ update_form.assigned_department.label }}</label>
+              {{ update_form.assigned_department }}
+            </div>
+            <div>
+              <label class="form-label" for="{{ update_form.assigned_to.id_for_label }}">{{ update_form.assigned_to.label }}</label>
+              {{ update_form.assigned_to }}
+            </div>
+            <div>
+              <label class="form-label" for="{{ update_form.internal_note.id_for_label }}">{{ update_form.internal_note.label }}</label>
+              {{ update_form.internal_note }}
+            </div>
+            <div>
+              <label class="form-label" for="{{ update_form.public_resolution_note.id_for_label }}">{{ update_form.public_resolution_note.label }}</label>
+              {{ update_form.public_resolution_note }}
+            </div>
+            <button class="btn btn-success" type="submit">Зачувај промени</button>
+          </form>
+        </section>
+      {% endif %}
+
+      {% if can_change_status %}
+        <section class="surface-card rounded-3 p-4">
+          <h2 class="h5 fw-bold mb-3">Промени статус</h2>
+          <form method="post" action="{% url 'staff_change_status' issue.pk %}">
+            {% csrf_token %}
+            <div class="mb-3">
+              <label class="form-label" for="status">Нов статус</label>
+              <select class="form-select" id="status" name="status">
+                {% for value,label in status_choices %}<option value="{{ value }}" {% if issue.status == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+              </select>
+            </div>
+            <div class="mb-3">
+              <label class="form-label" for="note">Белешка</label>
+              <textarea class="form-control" id="note" name="note" rows="3" placeholder="Внеси кратка службена белешка..."></textarea>
+              <div class="form-text">За решена, дупликат, спам и ненадлежна пријава белешката е задолжителна.</div>
+            </div>
+            <button class="btn btn-success" type="submit">Зачувај статус</button>
+          </form>
+        </section>
+      {% endif %}
+
+      {% if issue.public_resolution_note or issue.internal_note %}
+        <section class="surface-card rounded-3 p-4">
+          <h2 class="h5 fw-bold mb-3">Белешки</h2>
+          {% if issue.public_resolution_note %}
+            <p><strong>Јавна белешка:</strong><br>{{ issue.public_resolution_note|linebreaksbr }}</p>
+          {% endif %}
+          {% if issue.internal_note %}
+            <p class="mb-0"><strong>Интерна белешка:</strong><br>{{ issue.internal_note|linebreaksbr }}</p>
+          {% endif %}
+        </section>
+      {% endif %}
+
+      <section class="surface-card rounded-3 p-4">
+        <h2 class="h5 fw-bold mb-3">Аудит лог</h2>
+        {% for log in audit_logs %}
+          <p class="mb-2 small">
+            <strong>{{ log.created_at|date:"d.m.Y H:i" }}</strong> · {{ log.action }}
+            {% if log.actor %}<span class="text-secondary">· {{ log.actor.get_username }}</span>{% endif %}
+          </p>
+        {% empty %}
+          <p class="text-secondary mb-0">Нема аудит записи.</p>
+        {% endfor %}
+      </section>
+    </div>
+  </div>
+</section>
+{% endblock %}

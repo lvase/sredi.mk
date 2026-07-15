@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Нов службен корисник · Opštinski Inbox{% endblock %}
+{% block content %}
+<section class="row g-4">
+  <div class="col-lg-4">
+    <p class="text-success fw-semibold text-uppercase small ls-2 mb-2">Opštinski Inbox</p>
+    <h1 class="display-6 fw-bold">Нов службен корисник</h1>
+    <p class="text-secondary">Креирај пристап за општински службеник и веднаш ограничи го според општина, одделение и улога.</p>
+  </div>
+  <div class="col-lg-8">
+    <form method="post" class="surface-card rounded-3 p-4 p-lg-5">
+      {% csrf_token %}
+      {% if form.non_field_errors %}
+        <div class="alert alert-danger">{{ form.non_field_errors }}</div>
+      {% endif %}
+      <div class="row g-3">
+        <div class="col-md-6">
+          <label class="form-label" for="{{ form.username.id_for_label }}">{{ form.username.label }}</label>
+          {{ form.username }}
+          {{ form.username.errors }}
+        </div>
+        <div class="col-md-6">
+          <label class="form-label" for="{{ form.email.id_for_label }}">{{ form.email.label }}</label>
+          {{ form.email }}
+          {{ form.email.errors }}
+        </div>
+        <div class="col-md-6">
+          <label class="form-label" for="{{ form.password.id_for_label }}">{{ form.password.label }}</label>
+          {{ form.password }}
+          {{ form.password.errors }}
+        </div>
+        <div class="col-md-6">
+          <label class="form-label" for="{{ form.role.id_for_label }}">{{ form.role.label }}</label>
+          {{ form.role }}
+          {{ form.role.errors }}
+        </div>
+        <div class="col-md-6">
+          <label class="form-label" for="{{ form.municipality.id_for_label }}">{{ form.municipality.label }}</label>
+          {{ form.municipality }}
+          {{ form.municipality.errors }}
+        </div>
+        <div class="col-md-6">
+          <label class="form-label" for="{{ form.department.id_for_label }}">{{ form.department.label }}</label>
+          {{ form.department }}
+          <div class="form-text">Одделението се пополнува според избраната општина.</div>
+          {{ form.department.errors }}
+        </div>
+        <div class="col-12"><p class="small text-muted mb-0">Корисникот мора да ја смени привремената лозинка при првата најава. 2FA може доброволно да ја вклучи од безбедносниот профил.</p></div>
+      </div>
+      <div class="d-flex flex-wrap gap-2 mt-4 pt-4 border-top">
+        <button class="btn btn-success btn-lg px-4" type="submit">
+          <i class="bi bi-person-plus me-2" aria-hidden="true"></i>Креирај корисник
+        </button>
+        <a class="btn btn-outline-secondary btn-lg px-4" href="{% url 'staff_dashboard' %}">Откажи</a>
+      </div>
+    </form>
+  </div>
+</section>
+{% endblock %}

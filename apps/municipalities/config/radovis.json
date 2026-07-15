@@ -1,0 +1,20 @@
+{
+  "name": "Општина Радовиш",
+  "slug": "radovis",
+  "settlements": ["Радовиш"],
+  "departments": [
+    {"name": "Комунални работи"},
+    {"name": "Јавно осветлување"},
+    {"name": "Патишта"},
+    {"name": "Администрација"}
+  ],
+  "categories": [
+    {"name": "Јавно осветлување", "default_department": "Јавно осветлување"},
+    {"name": "Улици и патишта", "default_department": "Патишта"},
+    {"name": "Отпад и чистота", "default_department": "Комунални работи"},
+    {"name": "Водовод и канализација", "default_department": "Комунални работи"},
+    {"name": "Паркови и зеленило", "default_department": "Комунални работи"},
+    {"name": "Друго", "default_department": "Администрација"}
+  ],
+  "sla": {"triage_hours": 24, "first_response_hours": 48, "resolution_hours": 240}
+}

@@ -1,0 +1,26 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+  <h1>Увоз на општинска конфигурација</h1>
+  {% if errors %}<ul class="errorlist">{% for error in errors %}<li>{{ error }}</li>{% endfor %}</ul>{% endif %}
+  <form method="post" enctype="multipart/form-data">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <input type="submit" value="Прегледај" class="default">
+  </form>
+  {% if preview %}
+    <h2>Преглед</h2>
+    <p><strong>{{ preview.name }}</strong> ({{ preview.slug }})</p>
+    <ul>
+      <li>Населени места: {{ preview.settlement_count }}</li>
+      <li>Одделенија: {{ preview.department_count }}</li>
+      <li>Категории: {{ preview.category_count }}</li>
+      <li>Извор: {{ preview.source_reference }}</li>
+      <li>Верификувана: {{ preview.verify|yesno:"Да,Не" }}</li>
+    </ul>
+    <form method="post">
+      {% csrf_token %}
+      <input type="hidden" name="apply_preview" value="1">
+      <input type="submit" value="Примени конфигурација" class="default">
+    </form>
+  {% endif %}
+{% endblock %}

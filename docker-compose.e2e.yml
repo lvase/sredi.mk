@@ -1,0 +1,71 @@
+services:
+  e2e-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: opstinski_e2e
+      POSTGRES_USER: opstinski_e2e
+      POSTGRES_PASSWORD: opstinski_e2e
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opstinski_e2e -d opstinski_e2e"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  e2e-web:
+    build: .
+    command: sh -c "python manage.py migrate && python manage.py seed_e2e && python manage.py runserver 0.0.0.0:8000"
+    environment:
+      DJANGO_DEBUG: "1"
+      E2E_TEST_MODE: "1"
+      DJANGO_SECRET_KEY: e2e-only-secret
+      DJANGO_ALLOWED_HOSTS: e2e-web,localhost,127.0.0.1
+      FRONTEND_DEV_ORIGINS: http://e2e-frontend:5173
+      CSRF_TRUSTED_ORIGINS: http://e2e-frontend:5173
+      POSTGRES_DB: opstinski_e2e
+      POSTGRES_USER: opstinski_e2e
+      POSTGRES_PASSWORD: opstinski_e2e
+      POSTGRES_HOST: e2e-db
+      POSTGRES_PORT: "5432"
+    depends_on:
+      e2e-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/municipalities/')"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  e2e-frontend:
+    build:
+      context: ./frontend
+    command: npm run dev -- --host 0.0.0.0
+    environment:
+      VITE_API_BASE_URL: /api
+      VITE_BACKEND_ORIGIN: http://e2e-web:8000
+      VITE_ALLOWED_HOSTS: e2e-frontend
+    depends_on:
+      e2e-web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:5173').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  e2e-tests:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.e2e
+    environment:
+      PLAYWRIGHT_BASE_URL: http://e2e-frontend:5173
+      PLAYWRIGHT_ARGS: ${PLAYWRIGHT_ARGS:-}
+    command: sh -c "npm run test:e2e -- $$PLAYWRIGHT_ARGS"
+    volumes:
+      - ./frontend/e2e:/app/frontend/e2e
+      - ./frontend/test-results:/app/frontend/test-results
+      - ./frontend/playwright-report:/app/frontend/playwright-report
+    depends_on:
+      e2e-frontend:
+        condition: service_healthy

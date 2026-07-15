@@ -1,0 +1,214 @@
+{% extends "base.html" %}
+{% block title %}Opštinski Inbox · Работна табла{% endblock %}
+{% block content %}
+<section class="d-flex flex-column flex-lg-row justify-content-between gap-4 align-items-lg-end mb-4">
+  <div>
+    <p class="text-success fw-semibold text-uppercase small ls-2 mb-2">Opštinski Inbox</p>
+    <h1 class="display-6 fw-bold mb-2">Работна табла</h1>
+    <p class="text-secondary mb-0">Прием, филтрирање, распределба и следење на граѓански пријави.</p>
+  </div>
+  {% if request.user.is_superuser %}
+    <a class="btn btn-success btn-lg px-4" href="{% url 'staff_create_user' %}">
+      <i class="bi bi-person-plus me-2" aria-hidden="true"></i>Нов службен корисник
+    </a>
+  {% endif %}
+</section>
+
+<section class="row g-3 mb-4">
+  <div class="col-6 col-xl">
+    <div class="card stat-card h-100">
+      <div class="card-body">
+        <div class="text-secondary small">Вкупно</div>
+        <div class="fs-3 fw-bold">{{ dashboard_metrics.total }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-xl">
+    <div class="card stat-card h-100">
+      <div class="card-body">
+        <div class="text-secondary small">Активни</div>
+        <div class="fs-3 fw-bold text-primary">{{ dashboard_metrics.open }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-xl">
+    <div class="card stat-card h-100">
+      <div class="card-body">
+        <div class="text-secondary small">Чекаат проверка</div>
+        <div class="fs-3 fw-bold text-warning">{{ dashboard_metrics.pending }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-xl">
+    <div class="card stat-card h-100">
+      <div class="card-body">
+        <div class="text-secondary small">Мои</div>
+        <div class="fs-3 fw-bold text-success">{{ dashboard_metrics.my }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-xl">
+    <div class="card stat-card h-100">
+      <div class="card-body">
+        <div class="text-secondary small">Задоцнети</div>
+        <div class="fs-3 fw-bold text-danger">{{ dashboard_metrics.overdue }}</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<form method="get" class="surface-card rounded-3 p-3 p-lg-4 mb-4">
+  <div class="d-flex align-items-center gap-2 mb-3">
+    <span class="icon-tile-sm rounded-circle bg-success-subtle text-success d-inline-flex align-items-center justify-content-center">
+      <i class="bi bi-funnel" aria-hidden="true"></i>
+    </span>
+    <h2 class="h5 fw-bold mb-0">Филтри</h2>
+  </div>
+  <div class="row g-3 align-items-end">
+    <div class="col-md-3">
+      <label class="form-label" for="id_municipality_filter">Општина</label>
+      <select class="form-select" id="id_municipality_filter" name="municipality">
+        <option value="">Сите општини</option>
+        {% for municipality in municipalities %}<option value="{{ municipality.id }}" {% if selected_municipality == municipality.id|stringformat:'s' %}selected{% endif %}>{{ municipality.name }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="col-md-3">
+      <label class="form-label" for="id_status_filter">Статус</label>
+      <select class="form-select" id="id_status_filter" name="status">
+        <option value="">Сите статуси</option>
+        {% for value,label in status_choices %}<option value="{{ value }}" {% if selected_status == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="col-md-3">
+      <label class="form-label" for="id_settlement_filter">Населено место</label>
+      <select class="form-select" id="id_settlement_filter" name="settlement">
+        <option value="">Сите населени места</option>
+        {% for settlement in settlements %}<option value="{{ settlement.id }}" {% if selected_settlement == settlement.id|stringformat:'s' %}selected{% endif %}>{{ settlement.name }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="col-md-3">
+      <label class="form-label" for="id_category_filter">Категорија</label>
+      <select class="form-select" id="id_category_filter" name="category">
+        <option value="">Сите категории</option>
+        {% for category in categories %}<option value="{{ category.id }}" {% if selected_category == category.id|stringformat:'s' %}selected{% endif %}>{{ category.name }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="col-md-3">
+      <label class="form-label" for="id_priority_filter">Приоритет</label>
+      <select class="form-select" id="id_priority_filter" name="priority">
+        <option value="">Сите приоритети</option>
+        {% for value,label in priority_choices %}<option value="{{ value }}" {% if selected_priority == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="col-md-3">
+      <label class="form-label" for="id_department_filter">Одделение</label>
+      <select class="form-select" id="id_department_filter" name="department">
+        <option value="">Сите одделенија</option>
+        {% for department in departments %}<option value="{{ department.id }}" {% if selected_department == department.id|stringformat:'s' %}selected{% endif %}>{{ department.name }} · {{ department.municipality.name }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="col-md-3">
+      <label class="form-label" for="id_assigned_to_filter">Задолжен</label>
+      <select class="form-select" id="id_assigned_to_filter" name="assigned_to">
+        <option value="">Сите вработени</option>
+        {% for assignee in assignees %}<option value="{{ assignee.id }}" {% if selected_assigned_to == assignee.id|stringformat:'s' %}selected{% endif %}>{{ assignee.get_username }} · {{ assignee.staffprofile.municipality.name }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="col-md-3">
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" id="id_mine_filter" name="mine" value="1" {% if selected_mine %}checked{% endif %}>
+        <label class="form-check-label" for="id_mine_filter">Само мои пријави</label>
+      </div>
+      <div class="form-check mt-2">
+        <input class="form-check-input" type="checkbox" id="id_overdue_filter" name="overdue" value="1" {% if selected_overdue %}checked{% endif %}>
+        <label class="form-check-label" for="id_overdue_filter">Само задоцнети</label>
+      </div>
+    </div>
+    <div class="col-md-3 d-flex gap-2">
+      <button class="btn btn-success px-4" type="submit">Филтрирај</button>
+      <a class="btn btn-outline-secondary" href="{% url 'staff_dashboard' %}">Исчисти</a>
+    </div>
+  </div>
+</form>
+
+<section class="surface-card rounded-3 overflow-hidden">
+  <div class="d-flex flex-column flex-md-row justify-content-between gap-2 p-4 border-bottom">
+    <div>
+      <h2 class="h5 fw-bold mb-1">Пријави</h2>
+      <p class="text-secondary small mb-0">Се прикажуваат најновите 100 пријави според тековните филтри.</p>
+    </div>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-hover table-clean align-middle mb-0">
+      <thead>
+        <tr>
+          <th>Код</th>
+          <th>Пријава</th>
+          <th>Општина</th>
+          <th>Локација</th>
+          <th>Приоритет</th>
+          <th>Статус</th>
+          <th>Задолжен</th>
+          <th>Датум</th>
+          <th class="text-end">Акции</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in issue_rows %}
+          {% with issue=row.issue %}
+            <tr>
+              <td><a class="fw-semibold font-monospace text-decoration-none" href="{% url 'staff_issue_detail' issue.pk %}">{{ issue.tracking_code }}</a></td>
+              <td>
+                <div class="fw-semibold">{{ issue.title }}</div>
+                <div class="text-secondary small">{{ issue.category.name }}</div>
+              </td>
+              <td>{{ issue.municipality.name }}</td>
+              <td>
+                <div>{{ issue.settlement.name }}</div>
+                <div class="text-secondary small">{{ issue.assigned_department|default:"Без одделение" }}</div>
+              </td>
+              <td>
+                <span class="badge rounded-pill {% if issue.priority == 'urgent' %}text-bg-danger{% elif issue.priority == 'high' %}text-bg-warning{% elif issue.priority == 'low' %}text-bg-secondary{% else %}text-bg-light border text-dark{% endif %}">
+                  {{ issue.get_priority_display }}
+                </span>
+              </td>
+              <td>
+                <span class="badge rounded-pill {% if issue.status == 'resolved' or issue.status == 'closed' %}text-bg-success{% elif issue.status == 'pending_triage' %}text-bg-warning{% elif issue.status == 'rejected_spam' %}text-bg-danger{% elif issue.status == 'not_jurisdiction' or issue.status == 'duplicate' %}text-bg-secondary{% else %}text-bg-primary{% endif %}">
+                  {{ issue.get_status_display }}
+                </span>
+                {% if row.is_overdue %}<span class="badge rounded-pill text-bg-danger ms-1">Задоцнета</span>{% endif %}
+              </td>
+              <td>{{ issue.assigned_to|default:"-" }}</td>
+              <td>{{ issue.submitted_at|date:"d.m.Y H:i" }}</td>
+              <td>
+                <div class="d-flex justify-content-end flex-wrap gap-1">
+                  <a class="btn btn-sm btn-outline-secondary" href="{% url 'staff_issue_detail' issue.pk %}">Отвори</a>
+                  {% for status,label in row.quick_status_actions %}
+                    <form method="post" action="{% url 'staff_change_status' issue.pk %}">
+                      {% csrf_token %}
+                      <input type="hidden" name="status" value="{{ status }}">
+                      <button class="btn btn-sm btn-outline-success" type="submit">{{ label }}</button>
+                    </form>
+                  {% endfor %}
+                </div>
+              </td>
+            </tr>
+          {% endwith %}
+        {% empty %}
+          <tr>
+            <td colspan="9">
+              <div class="text-center py-5">
+                <span class="icon-tile rounded-circle bg-light border d-inline-flex align-items-center justify-content-center mb-3">
+                  <i class="bi bi-inbox fs-4 text-secondary" aria-hidden="true"></i>
+                </span>
+                <p class="fw-semibold mb-1">Нема пријави</p>
+                <p class="text-secondary mb-0">Промени ги филтрите или провери повторно подоцна.</p>
+              </div>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

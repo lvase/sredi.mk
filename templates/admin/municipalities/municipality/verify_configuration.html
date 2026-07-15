@@ -1,0 +1,16 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+  <h1>Верификација на општинска конфигурација</h1>
+  {% for item in validation %}
+    <h2>{{ item.municipality.name }}</h2>
+    {% if item.errors %}<ul class="errorlist">{% for error in item.errors %}<li>{{ error }}</li>{% endfor %}</ul>{% else %}<p>Конфигурацијата е валидна.</p>{% endif %}
+  {% endfor %}
+  <form method="post">
+    {% csrf_token %}
+    {% for municipality in municipalities %}<input type="hidden" name="_selected_action" value="{{ municipality.pk }}">{% endfor %}
+    <input type="hidden" name="action" value="verify_configuration">
+    <input type="hidden" name="confirm_verification" value="1">
+    {{ form.as_p }}
+    <input type="submit" value="Потврди верификација" class="default">
+  </form>
+{% endblock %}

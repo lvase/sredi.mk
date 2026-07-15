@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% block title %}Пријави проблем · Sredi{% endblock %}
+{% block content %}
+<section class="row g-4 align-items-start">
+  <div class="col-lg-4">
+    <div class="position-sticky" style="top: 6rem;">
+      <p class="text-success fw-semibold text-uppercase small ls-2 mb-2">Sredi · {{ municipality.name }}</p>
+      <h1 class="display-6 fw-bold text-balance">Пријави локален проблем</h1>
+      <p class="text-secondary">Пријавата може да биде анонимна. Контакт податоците се незадолжителни и се користат само ако општината има потреба од дополнување.</p>
+      <div class="surface-card rounded-3 p-3 mt-4">
+        <div class="d-flex gap-3">
+          <span class="icon-tile-sm rounded-circle bg-success-subtle text-success d-inline-flex align-items-center justify-content-center flex-shrink-0">
+            <i class="bi bi-shield-lock" aria-hidden="true"></i>
+          </span>
+          <div>
+            <h2 class="h6 fw-bold mb-1">Без јавни лични податоци</h2>
+            <p class="small text-secondary mb-0">Јавно се гледаат само агрегирани статистики и безбедни статусни информации.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-8">
+    <form method="post" enctype="multipart/form-data" class="vstack gap-4">
+      {% csrf_token %}
+      {{ form.website }}
+      {% if form.non_field_errors %}
+        <div class="alert alert-danger">{{ form.non_field_errors }}</div>
+      {% endif %}
+
+      <section class="surface-card rounded-3 p-4 p-lg-5">
+        <div class="d-flex gap-3 align-items-center mb-4">
+          <span class="icon-tile rounded-circle bg-success-subtle text-success d-inline-flex align-items-center justify-content-center">
+            <i class="bi bi-geo-alt fs-4" aria-hidden="true"></i>
+          </span>
+          <div>
+            <p class="small text-secondary mb-1">Чекор 1</p>
+            <h2 class="h4 fw-bold mb-0">Каде е проблемот?</h2>
+          </div>
+        </div>
+        <div class="row g-3">
+          <div class="col-md-6">
+            <label class="form-label" for="{{ form.settlement.id_for_label }}">{{ form.settlement.label }}</label>
+            {{ form.settlement }}
+            {{ form.settlement.errors }}
+          </div>
+          <div class="col-md-6">
+            <label class="form-label" for="{{ form.category.id_for_label }}">{{ form.category.label }}</label>
+            {{ form.category }}
+            {{ form.category.errors }}
+          </div>
+          <div class="col-12">
+            <label class="form-label" for="{{ form.location_text.id_for_label }}">{{ form.location_text.label }}</label>
+            {{ form.location_text }}
+            {{ form.location_text.errors }}
+          </div>
+        </div>
+      </section>
+
+      <section class="surface-card rounded-3 p-4 p-lg-5">
+        <div class="d-flex gap-3 align-items-center mb-4">
+          <span class="icon-tile rounded-circle bg-warning-subtle text-warning-emphasis d-inline-flex align-items-center justify-content-center">
+            <i class="bi bi-exclamation-triangle fs-4" aria-hidden="true"></i>
+          </span>
+          <div>
+            <p class="small text-secondary mb-1">Чекор 2</p>
+            <h2 class="h4 fw-bold mb-0">Што треба да се среди?</h2>
+          </div>
+        </div>
+        <div class="vstack gap-3">
+          <div>
+            <label class="form-label" for="{{ form.title.id_for_label }}">{{ form.title.label }}</label>
+            {{ form.title }}
+            {{ form.title.errors }}
+          </div>
+          <div>
+            <label class="form-label" for="{{ form.description.id_for_label }}">{{ form.description.label }}</label>
+            {{ form.description }}
+            {{ form.description.errors }}
+          </div>
+          <div>
+            <label class="form-label" for="id_photos">Фотографии</label>
+            <input class="form-control" id="id_photos" name="photos" type="file" accept="image/jpeg,image/png,image/webp" multiple>
+            <div class="form-text">Незадолжително, максимум 5 фотографии. Дозволени се JPG, PNG и WEBP.</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="surface-card rounded-3 p-4 p-lg-5">
+        <div class="d-flex gap-3 align-items-center mb-4">
+          <span class="icon-tile rounded-circle bg-primary-subtle text-primary d-inline-flex align-items-center justify-content-center">
+            <i class="bi bi-person-lines-fill fs-4" aria-hidden="true"></i>
+          </span>
+          <div>
+            <p class="small text-secondary mb-1">Чекор 3</p>
+            <h2 class="h4 fw-bold mb-0">Контакт, ако сакаш</h2>
+          </div>
+        </div>
+        <div class="row g-3">
+          <div class="col-md-4">
+            <label class="form-label" for="{{ form.citizen_name.id_for_label }}">{{ form.citizen_name.label }}</label>
+            {{ form.citizen_name }}
+            {{ form.citizen_name.errors }}
+          </div>
+          <div class="col-md-4">
+            <label class="form-label" for="{{ form.citizen_email.id_for_label }}">{{ form.citizen_email.label }}</label>
+            {{ form.citizen_email }}
+            {{ form.citizen_email.errors }}
+          </div>
+          <div class="col-md-4">
+            <label class="form-label" for="{{ form.citizen_phone.id_for_label }}">{{ form.citizen_phone.label }}</label>
+            {{ form.citizen_phone }}
+            {{ form.citizen_phone.errors }}
+          </div>
+          <div class="col-12">
+            <div class="form-check border rounded-3 p-3 ps-5 bg-light">
+              {{ form.consent }}
+              <label class="form-check-label" for="{{ form.consent.id_for_label }}">{{ form.consent.label }}</label>
+              {{ form.consent.errors }}
+            </div>
+          </div>
+        </div>
+        <div class="alert alert-warning d-flex gap-3 mt-4 mb-0" role="note">
+          <i class="bi bi-exclamation-triangle flex-shrink-0" aria-hidden="true"></i>
+          <p class="mb-0">
+            <strong>Важно:</strong> Пријавата испратете ја совесно и со точни информации според вашето сознание. Намерно лажни,
+            измамнички или манипулирани пријави може да бидат отфрлени, да доведат до ограничување на користењето на платформата
+            и, кога е законски оправдано, да бидат доставени до надлежните органи. Добронамерна грешка или неточна проценка нема
+            автоматски да се смета за злоупотреба.
+          </p>
+        </div>
+        <div class="d-flex flex-column flex-md-row justify-content-between align-items-md-center gap-3 mt-4 pt-4 border-top">
+          <p class="text-secondary small mb-0">
+            Со испраќање потврдуваш дека си ја прочитал/а
+            <a href="{% url 'privacy_policy' %}">Политиката за приватност</a> и
+            <a href="{% url 'terms_of_use' %}">Условите за користење</a>.
+          </p>
+          <button class="btn btn-success btn-lg px-4 py-2 fw-semibold" type="submit">
+            <i class="bi bi-send me-2" aria-hidden="true"></i>Испрати пријава
+          </button>
+        </div>
+      </section>
+    </form>
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Следи пријава · Sredi{% endblock %}
+{% block content %}
+<section class="row justify-content-center">
+  <div class="col-lg-8">
+    <div class="text-center mb-4">
+      <p class="text-success fw-semibold text-uppercase small ls-2 mb-2">Sredi · {{ municipality.name }}</p>
+      <h1 class="display-6 fw-bold">Следи пријава</h1>
+      <p class="text-secondary mb-0">Внеси го кодот што го доби по испраќање на пријавата.</p>
+    </div>
+    <section class="surface-card rounded-3 p-4 p-lg-5">
+      <form method="get" class="row g-2 align-items-end">
+        <div class="col-md">
+          <label class="form-label" for="code">Код за следење</label>
+          <div class="input-group input-group-lg">
+            <span class="input-group-text bg-white"><i class="bi bi-upc-scan" aria-hidden="true"></i></span>
+            <input class="form-control font-monospace" id="code" name="code" value="{{ code }}" placeholder="Пр. AB12CD34EF">
+          </div>
+        </div>
+        <div class="col-md-auto"><button class="btn btn-success btn-lg px-4" type="submit">Провери</button></div>
+      </form>
+    </section>
+    {% if issue %}
+      <section class="surface-card rounded-3 p-4 p-lg-5 mt-4">
+        <div class="d-flex flex-column flex-md-row justify-content-between gap-3">
+          <div>
+            <p class="text-secondary small mb-1">Пријава {{ issue.tracking_code }}</p>
+            <h2 class="h3 fw-bold mb-2">{{ issue.title }}</h2>
+            <p class="text-secondary mb-0">{{ issue.settlement.name }} · {{ issue.category.name }}</p>
+          </div>
+          <div>
+            <span class="badge fs-6 rounded-pill {% if issue.status == 'resolved' or issue.status == 'closed' %}text-bg-success{% elif issue.status == 'pending_triage' %}text-bg-warning{% elif issue.status == 'not_jurisdiction' or issue.status == 'duplicate' %}text-bg-secondary{% else %}text-bg-primary{% endif %}">
+              {{ issue.get_status_display }}
+            </span>
+          </div>
+        </div>
+        {% if issue.latest_public_update %}
+          <p class="text-secondary small mt-3 mb-0">Последно јавно ажурирање: {{ issue.latest_public_update.created_at|date:"d.m.Y H:i" }}</p>
+        {% endif %}
+      </section>
+      <section class="surface-card rounded-3 p-4 p-lg-5 mt-4">
+        <h3 class="h5 fw-bold mb-4">Јавни ажурирања</h3>
+        <div class="timeline">
+          {% for update in issue.public_updates %}
+            <div class="timeline-item">
+              <p class="small text-secondary mb-1">{{ update.created_at|date:"d.m.Y H:i" }}</p>
+              <p class="fw-semibold mb-1">{{ update.title }}</p>
+              <p class="mb-0">{{ update.body|linebreaksbr }}</p>
+            </div>
+          {% empty %}
+            <div class="d-flex gap-3 align-items-start">
+              <span class="icon-tile-sm rounded-circle bg-light border d-inline-flex align-items-center justify-content-center flex-shrink-0">
+                <i class="bi bi-clock-history" aria-hidden="true"></i>
+              </span>
+              <p class="text-secondary mb-0">Сè уште нема јавно ажурирање од општината.</p>
+            </div>
+          {% endfor %}
+        </div>
+      </section>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}
