@@ -71,3 +71,54 @@ for (const width of [320, 768, 1440]) {
     }
   });
 }
+
+test("key screens reflow at 200 percent text size on a narrow viewport", async ({ page }) => {
+  test.setTimeout(60_000);
+  await page.setViewportSize({ width: 320, height: 720 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const failures: string[] = [];
+  async function checkReflow(route: string) {
+    await page.goto(route);
+    await page.waitForLoadState("networkidle");
+    await page.evaluate(async () => {
+      document.documentElement.style.fontSize = "200%";
+      await document.fonts.ready;
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    });
+    const overflow = await page.evaluate(() => ({
+      width: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+      elements: [...document.querySelectorAll("main *, header *")]
+        .filter((element) => element.getBoundingClientRect().right > innerWidth + 1)
+        .slice(0, 6).map((element) => `${element.tagName}.${element.className}`)
+    }));
+    if (overflow.scrollWidth > overflow.width + 1) failures.push(`${route}: ${overflow.scrollWidth}px; ${overflow.elements.join(", ")}`);
+  }
+  for (const [, route] of routes) await checkReflow(route);
+  await login(page);
+  await checkReflow("/staff");
+  await checkReflow("/staff/issues/3");
+  expect(failures).toEqual([]);
+});
+
+test("mobile navigation supports keyboard dismissal and restores focus", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 720 });
+  await page.goto("/konce");
+  const trigger = page.getByRole("button", { name: "Отвори мени" });
+  await trigger.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  await page.keyboard.press("Enter");
+  await page.getByRole("dialog").getByRole("link", { name: "Следи пријава" }).click();
+  await expect(page).toHaveURL(/\/konce\/sledi$/);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Отвори мени" }).click();
+  await page.getByRole("dialog").getByRole("link", { name: "Избери општина" }).click();
+  await expect(page).toHaveURL(/\/#municipalities$/);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Избери општина." })).toBeInViewport();
+});

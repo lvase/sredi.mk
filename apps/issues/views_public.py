@@ -1,11 +1,16 @@
 from django.contrib import messages
 from django.db.models import Count, Prefetch
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, render
 
 from apps.issues.forms import CitizenIssueForm
+from apps.issues.image_processing import (
+    IssueImageValidationError,
+    prepare_issue_images,
+    save_issue_with_attachments,
+)
 from apps.issues.models import (
     Issue,
-    IssueAttachment,
     IssueComment,
     IssueStatus,
     IssueStatusEvent,
@@ -16,11 +21,12 @@ from apps.issues.services import (
     consume_submission_rate_limit,
     get_client_ip,
     hash_client_value,
+    normalize_tracking_code,
     public_status_label,
     tracking_code_matches,
-    validate_issue_uploads,
 )
 from apps.municipalities.models import Municipality
+from config.throttling import SharedThrottleUnavailable
 
 
 def get_municipality_or_404(municipality_slug):
@@ -64,18 +70,33 @@ def submit_issue(request, municipality_slug):
     if request.method == "POST":
         form = CitizenIssueForm(request.POST, municipality=municipality)
         files = request.FILES.getlist("photos")
-        upload_errors = validate_issue_uploads(files)
-        for error in upload_errors:
-            messages.error(request, error)
-        if form.is_valid() and not upload_errors:
+        form_is_valid = form.is_valid()
+        if form_is_valid:
             ip_hash = hash_client_value(get_client_ip(request))
-            allowed, rate_state = consume_submission_rate_limit(municipality, ip_hash)
+            try:
+                allowed, rate_state = consume_submission_rate_limit(municipality, ip_hash)
+            except SharedThrottleUnavailable:
+                return HttpResponse(
+                    "Заштитата е привремено недостапна. Обиди се повторно.",
+                    status=503,
+                    headers={"Retry-After": "60"},
+                )
             if not allowed:
                 messages.error(
                     request,
                     f"Испратени се премногу пријави од оваа мрежа. Обиди се повторно за приближно {max(1, (rate_state.retry_after_seconds + 59) // 60)} минути.",
                 )
             else:
+                try:
+                    processed_images = prepare_issue_images(files)
+                except IssueImageValidationError as exc:
+                    for error in exc.errors:
+                        messages.error(request, error)
+                    return render(
+                        request,
+                        "issues/public/report_form.html",
+                        {"form": form, "municipality": municipality},
+                    )
                 issue = form.save(commit=False)
                 issue.municipality = municipality
                 issue.submitted_ip_hash = ip_hash
@@ -92,9 +113,7 @@ def submit_issue(request, municipality_slug):
                         location_text=issue.location_text,
                     )
                 )
-                issue.save()
-                for file in files[:5]:
-                    IssueAttachment.objects.create(issue=issue, image=file)
+                save_issue_with_attachments(issue, processed_images)
                 return render(
                     request,
                     "issues/public/report_success.html",
@@ -112,25 +131,25 @@ def submit_issue(request, municipality_slug):
 
 def track_issue(request, municipality_slug):
     municipality = get_municipality_or_404(municipality_slug)
-    code = request.GET.get("code", "").strip()
+    code = normalize_tracking_code(request.GET.get("code", ""))
     issue = None
     if code:
         candidate = (
             Issue.objects.filter(
                 municipality=municipality,
-                tracking_code__iexact=code,
+                tracking_code=code,
             )
             .prefetch_related(
                 Prefetch(
                     "comments",
                     queryset=IssueComment.objects.filter(is_internal=False).select_related(
                         "author"
-                    ),
+                    ).order_by("-created_at", "-pk")[:100],
                     to_attr="public_comments",
                 ),
                 Prefetch(
                     "status_events",
-                    queryset=IssueStatusEvent.objects.all(),
+                    queryset=IssueStatusEvent.objects.order_by("-created_at", "-pk")[:100],
                     to_attr="public_status_events",
                 ),
             )

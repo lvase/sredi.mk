@@ -16,5 +16,5 @@
     {"name": "Паркови и зеленило", "default_department": "Комунални работи"},
     {"name": "Друго", "default_department": "Администрација"}
   ],
-  "sla": {"triage_hours": 24, "first_response_hours": 48, "resolution_hours": 240}
+  "response_targets": {"review_hours": 24, "resolution_hours": 240}
 }

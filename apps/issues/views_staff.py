@@ -1,20 +1,42 @@
+from datetime import timedelta
+
 from django.contrib import messages
 from django.contrib.auth import get_user_model
 from django.contrib.auth.decorators import login_required
-from django.db.models import Count
+from django.db.models import (
+    BooleanField,
+    Case,
+    Count,
+    DateTimeField,
+    ExpressionWrapper,
+    F,
+    IntegerField,
+    Q,
+    Value,
+    When,
+)
+from django.db.models.functions import Coalesce, Now
 from django.http import HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
 
 from apps.accounts.forms import StaffUserCreateForm
 from apps.issues.forms import IssueCommentForm, StaffIssueUpdateForm
-from apps.issues.models import AuditLog, Issue, IssueCategory, IssuePriority, IssueStatus
+from apps.issues.models import (
+    DEFAULT_RESOLUTION_TARGET_HOURS,
+    DEFAULT_REVIEW_TARGET_HOURS,
+    FINAL_ISSUE_STATUSES,
+    AuditLog,
+    Issue,
+    IssueCategory,
+    IssuePriority,
+    IssueStatus,
+)
 from apps.issues.services import (
     apply_default_department,
     can_add_issue_comment,
     can_change_issue_status,
     can_staff_access_issue,
     can_update_issue_assignment,
-    is_issue_overdue,
     publish_resolution_note_update,
     status_requires_note,
     write_audit_log,
@@ -22,16 +44,59 @@ from apps.issues.services import (
 from apps.municipalities.models import Department, Municipality, Settlement
 
 
+def annotate_staff_response_targets(queryset):
+    queryset = queryset.annotate(
+        target_review_hours=Coalesce(
+            "municipality__response_target__review_hours",
+            Value(DEFAULT_REVIEW_TARGET_HOURS),
+        ),
+        target_resolution_hours=Coalesce(
+            "municipality__response_target__resolution_hours",
+            Value(DEFAULT_RESOLUTION_TARGET_HOURS),
+        ),
+    ).annotate(
+        target_active_hours=Case(
+            When(status=IssueStatus.PENDING_TRIAGE, then=F("target_review_hours")),
+            default=F("target_resolution_hours"),
+            output_field=IntegerField(),
+        )
+    )
+    queryset = queryset.annotate(
+        target_deadline=ExpressionWrapper(
+            F("submitted_at") + F("target_active_hours") * Value(timedelta(hours=1)),
+            output_field=DateTimeField(),
+        )
+    )
+    return queryset.annotate(
+        target_overdue=Case(
+            When(status__in=FINAL_ISSUE_STATUSES, then=Value(False)),
+            When(target_deadline__lt=Now(), then=Value(True)),
+            default=Value(False),
+            output_field=BooleanField(),
+        ),
+        target_due_soon=Case(
+            When(status__in=FINAL_ISSUE_STATUSES, then=Value(False)),
+            When(
+                target_deadline__gte=Now(),
+                target_deadline__lte=Now() + timedelta(hours=24),
+                then=Value(True),
+            ),
+            default=Value(False),
+            output_field=BooleanField(),
+        ),
+    )
+
+
 def staff_issue_queryset(user):
     qs = Issue.objects.select_related(
         "municipality", "settlement", "category", "assigned_department", "assigned_to"
     )
     if user.is_superuser:
-        return qs
+        return annotate_staff_response_targets(qs)
     profile = getattr(user, "staffprofile", None)
     if not profile or not profile.municipality_id:
-        return Issue.objects.none()
-    return qs.filter(municipality_id=profile.municipality_id)
+        return annotate_staff_response_targets(Issue.objects.none())
+    return annotate_staff_response_targets(qs.filter(municipality_id=profile.municipality_id))
 
 
 def quick_status_actions(user, issue):
@@ -75,6 +140,8 @@ def staff_dashboard(request):
         issues = issues.filter(assigned_to_id=assigned_to)
     if mine:
         issues = issues.filter(assigned_to=request.user)
+    if overdue == "1":
+        issues = issues.filter(target_overdue=True)
 
     base = staff_issue_queryset(request.user)
     stats = base.values("status").annotate(total=Count("id"))
@@ -110,25 +177,21 @@ def staff_dashboard(request):
         )
     issue_rows = []
     for issue in issues[:100]:
-        issue_overdue = is_issue_overdue(issue)
         issue_rows.append(
             {
                 "issue": issue,
-                "is_overdue": issue_overdue,
+                "is_overdue": bool(issue.target_overdue),
                 "can_change_status": can_change_issue_status(request.user, issue),
                 "quick_status_actions": quick_status_actions(request.user, issue),
             }
         )
-    if overdue == "1":
-        issue_rows = [row for row in issue_rows if row["is_overdue"]]
-    base_sample = list(base[:100])
-    dashboard_metrics = {
-        "total": base.count(),
-        "pending": base.filter(status=IssueStatus.PENDING_TRIAGE).count(),
-        "open": base.exclude(status__in=[IssueStatus.RESOLVED, IssueStatus.CLOSED]).count(),
-        "my": base.filter(assigned_to=request.user).count(),
-        "overdue": sum(1 for issue in base_sample if is_issue_overdue(issue)),
-    }
+    dashboard_metrics = base.aggregate(
+        total=Count("id"),
+        pending=Count("id", filter=Q(status=IssueStatus.PENDING_TRIAGE)),
+        open=Count("id", filter=~Q(status__in=FINAL_ISSUE_STATUSES)),
+        my=Count("id", filter=Q(assigned_to=request.user)),
+        overdue=Count("id", filter=Q(target_overdue=True)),
+    )
 
     return render(
         request,

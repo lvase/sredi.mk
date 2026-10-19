@@ -15,6 +15,18 @@ export function PageHeader({ eyebrow, title, description, actions }: { eyebrow?:
   );
 }
 
+export type StatItem = { label: string; value: React.ReactNode; detail?: string; tone?: "default" | "info" | "warning" | "danger" | "success"; href?: string };
+export function StatStrip({ items, label }: { items: StatItem[]; label: string }) {
+  return <section className="stat-strip" aria-label={label}>{items.map((item) => {
+    const body = <><span>{item.label}</span><strong data-tone={item.tone || "default"}>{item.value}</strong>{item.detail ? <small>{item.detail}</small> : null}</>;
+    return item.href ? <Link key={item.label} to={item.href}>{body}</Link> : <div key={item.label}>{body}</div>;
+  })}</section>;
+}
+
+export function SectionHeading({ number, title, description }: { number?: string; title: string; description?: string }) {
+  return <div className="section-heading">{number ? <span aria-hidden="true">{number}</span> : null}<div><h2>{title}</h2>{description ? <p>{description}</p> : null}</div></div>;
+}
+
 export function MetricCard({ label, value, detail, href, tone = "default" }: { label: string; value: React.ReactNode; detail?: string; href?: string; tone?: "default" | "info" | "warning" | "danger" | "success" }) {
   const body = <Card className={cn("metric-card", `metric-card--${tone}`)}><CardContent><p>{label}</p><strong>{value}</strong>{detail ? <small>{detail}</small> : null}</CardContent></Card>;
   return href ? <Link className="metric-card-link" to={href}>{body}</Link> : body;

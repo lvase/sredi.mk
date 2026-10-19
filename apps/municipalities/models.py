@@ -52,6 +52,7 @@ class Municipality(models.Model):
         related_name="verified_municipality_configurations",
         on_delete=models.SET_NULL,
     )
+    statistics_version = models.PositiveBigIntegerField(default=1, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

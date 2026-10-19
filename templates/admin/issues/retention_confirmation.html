@@ -1,7 +1,7 @@
 {% extends "admin/base_site.html" %}
 {% block content %}
   <h1>Потврди примена на политиката за задржување</h1>
-  <p>Оваа операција трајно ќе анонимизира податоци и ќе избрише прилози. Прегледајте ги бројките пред потврда.</p>
+  <p>Оваа операција ќе стави задача во редица за трајно бришење на подобните прилози. Прегледајте ги бројките пред потврда.</p>
   <table>
     <thead><tr><th>Општина</th><th>Контакти</th><th>Пријави со прилози</th><th>Rate-limit записи</th></tr></thead>
     <tbody>
@@ -20,7 +20,7 @@
     {% for municipality in municipalities %}<input type="hidden" name="_selected_action" value="{{ municipality.pk }}">{% endfor %}
     <input type="hidden" name="action" value="apply_data_retention">
     <input type="hidden" name="apply_retention" value="1">
-    <input type="submit" value="Потврди и примени" class="default">
+    <input type="submit" value="Потврди и стави во редица" class="default">
     <a href="../">Откажи</a>
   </form>
 {% endblock %}

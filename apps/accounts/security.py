@@ -14,10 +14,12 @@ from django.utils import timezone
 from django.utils.crypto import constant_time_compare
 from django_otp.plugins.otp_totp.models import TOTPDevice
 
-from apps.accounts.models import AuthenticationAttempt, RecoveryCode, StaffProfile, TrustedDevice
+from apps.accounts.models import RecoveryCode, StaffProfile, TrustedDevice
+from config.throttling import clear_fixed_window, current_fixed_window, increment_fixed_window
 
 ATTEMPT_WINDOW = timedelta(minutes=15)
 MAX_AUTH_FAILURES = 5
+MAX_AUTH_IP_FAILURES = 20
 TRUSTED_DEVICE_AGE = timedelta(days=30)
 PENDING_USER_SESSION_KEY = "pending_auth_user_id"
 TRUSTED_DEVICE_COOKIE = "sredi_trusted_device"
@@ -45,53 +47,44 @@ def attempt_identity(username, ip_address):
     )
 
 
-@transaction.atomic
 def auth_attempt_state(username, ip_address):
-    now = timezone.now()
     username_hash, ip_hash = attempt_identity(username, ip_address)
-    attempt, _ = AuthenticationAttempt.objects.select_for_update().get_or_create(
-        username_hash=username_hash,
-        ip_hash=ip_hash,
-        defaults={"window_start": now},
+    seconds = int(ATTEMPT_WINDOW.total_seconds())
+    dimensions = (
+        ("auth-account", username_hash, MAX_AUTH_FAILURES),
+        ("auth-ip", ip_hash, MAX_AUTH_IP_FAILURES),
+        ("auth-combined", f"{username_hash}:{ip_hash}", MAX_AUTH_FAILURES),
     )
-    if now - attempt.window_start >= ATTEMPT_WINDOW:
-        attempt.window_start = now
-        attempt.failure_count = 0
-        attempt.save(update_fields=["window_start", "failure_count", "updated_at"])
-    if attempt.failure_count < MAX_AUTH_FAILURES:
-        return AttemptState(True)
-    retry_at = attempt.window_start + ATTEMPT_WINDOW
-    return AttemptState(False, max(1, int((retry_at - now).total_seconds())))
+    states = [(*current_fixed_window(prefix, identity, seconds), limit) for prefix, identity, limit in dimensions]
+    blocked = [retry for count, retry, limit in states if count >= limit]
+    return AttemptState(not blocked, max(blocked, default=0))
 
 
-@transaction.atomic
 def record_auth_failure(username, ip_address):
-    now = timezone.now()
     username_hash, ip_hash = attempt_identity(username, ip_address)
-    attempt, _ = AuthenticationAttempt.objects.select_for_update().get_or_create(
-        username_hash=username_hash,
-        ip_hash=ip_hash,
-        defaults={"window_start": now},
+    seconds = int(ATTEMPT_WINDOW.total_seconds())
+    dimensions = (
+        ("auth-account", username_hash, MAX_AUTH_FAILURES),
+        ("auth-ip", ip_hash, MAX_AUTH_IP_FAILURES),
+        ("auth-combined", f"{username_hash}:{ip_hash}", MAX_AUTH_FAILURES),
     )
-    if now - attempt.window_start >= ATTEMPT_WINDOW:
-        attempt.window_start = now
-        attempt.failure_count = 0
-    attempt.failure_count += 1
-    attempt.save(update_fields=["window_start", "failure_count", "updated_at"])
-    if attempt.failure_count >= MAX_AUTH_FAILURES:
+    states = [(*increment_fixed_window(prefix, identity, seconds), limit) for prefix, identity, limit in dimensions]
+    if any(count >= limit for count, _, limit in states):
         user = get_user_model().objects.filter(username__iexact=normalized_username(username)).first()
         if user:
             revoke_trusted_devices(user)
-    retry_at = attempt.window_start + ATTEMPT_WINDOW
+    blocked = [retry for count, retry, limit in states if count >= limit]
     return AttemptState(
-        attempt.failure_count < MAX_AUTH_FAILURES,
-        max(1, int((retry_at - now).total_seconds())),
+        not blocked,
+        max(blocked, default=0),
     )
 
 
 def clear_auth_failures(username, ip_address):
     username_hash, ip_hash = attempt_identity(username, ip_address)
-    AuthenticationAttempt.objects.filter(username_hash=username_hash, ip_hash=ip_hash).delete()
+    seconds = int(ATTEMPT_WINDOW.total_seconds())
+    clear_fixed_window("auth-account", username_hash, seconds)
+    clear_fixed_window("auth-combined", f"{username_hash}:{ip_hash}", seconds)
 
 
 def ensure_staff_profile(user):

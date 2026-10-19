@@ -44,15 +44,17 @@ export function StaffLayout() {
         <Link className="staff-nav-link mt-auto" to="/"><House className="h-4 w-4" /> Јавен портал</Link>
       </aside>
       <div className="min-w-0 md:col-start-2">
-        <header className="sticky top-0 z-20 border-b bg-white/95 backdrop-blur">
-          <div className="flex h-16 items-center gap-3 px-4 lg:px-7">
+        <header className="sticky top-0 z-20 border-b bg-white">
+          <div className="flex min-h-16 flex-wrap items-center py-2 gap-3 px-4 lg:px-7">
             <MobileNav staff>{nav}{session.data.user?.is_superuser ? <Link to="/staff/users/new"><UserPlus className="h-4 w-4" /> Нов корисник</Link> : null}<Link to="/"><House className="h-4 w-4" /> Јавен портал</Link></MobileNav>
-            <form onSubmit={submitSearch} className="relative max-w-xl flex-1"><Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" /><input name="search" aria-label="Пребарај пријави" placeholder="Код, наслов или локација…" className="h-10 w-full rounded-md border bg-slate-50 pl-9 pr-3 text-sm" /></form>
-            <DropdownMenu.Root>
-              <DropdownMenu.Trigger asChild><Button variant="ghost" className="max-w-52 justify-start"><CircleUserRound className="h-5 w-5" /><span className="hidden min-w-0 text-left sm:block"><strong className="block truncate text-xs">{session.data.user?.username}</strong><small className="block truncate text-[10px] text-muted-foreground">{role}</small></span></Button></DropdownMenu.Trigger>
-              <DropdownMenu.Portal><DropdownMenu.Content align="end" className="z-50 min-w-60 rounded-md border bg-white p-2 shadow-xl"><div className="border-b px-2 pb-2 text-xs text-muted-foreground">{session.data.user?.municipality?.name || "Сите општини"}</div><DropdownMenu.Item asChild><Link className="mt-1 flex w-full items-center gap-2 rounded px-2 py-2 text-sm hover:bg-muted" to="/staff/security"><ShieldCheck className="h-4 w-4" /> Безбедност</Link></DropdownMenu.Item><DropdownMenu.Item asChild><button className="flex w-full items-center gap-2 rounded px-2 py-2 text-sm hover:bg-muted" onClick={() => logout.mutate()}><LogOut className="h-4 w-4" /> Одјава</button></DropdownMenu.Item></DropdownMenu.Content></DropdownMenu.Portal>
-            </DropdownMenu.Root>
-            <Button variant="ghost" size="icon" aria-label="Одјава" onClick={() => logout.mutate()}><LogOut className="h-4 w-4" /></Button>
+            <form onSubmit={submitSearch} className="relative order-last min-w-0 basis-full sm:order-none sm:max-w-xl sm:flex-1 sm:basis-auto"><Search className="absolute left-3 top-3.5 h-4 w-4 text-muted-foreground" /><input name="search" aria-label="Пребарај пријави" placeholder="Код, наслов или локација…" className="min-h-11 w-full rounded-md border bg-slate-50 py-2 pl-9 pr-3 text-base" /></form>
+            <div className="ml-auto flex shrink-0 items-center gap-1">
+              <DropdownMenu.Root>
+                <DropdownMenu.Trigger asChild><Button variant="ghost" className="staff-account-menu" aria-label="Корисничко мени"><CircleUserRound className="h-5 w-5" /><span className="hidden min-w-0 text-left sm:block"><strong className="block truncate text-xs">{session.data.user?.username}</strong><small className="block truncate text-xs text-muted-foreground">{role}</small></span></Button></DropdownMenu.Trigger>
+                <DropdownMenu.Portal><DropdownMenu.Content align="end" className="z-50 min-w-60 rounded-md border bg-white p-2 shadow-xl"><div className="border-b px-2 pb-2 text-xs text-muted-foreground">{session.data.user?.municipality?.name || "Сите општини"}</div><DropdownMenu.Item asChild><Link className="mt-1 flex w-full items-center gap-2 min-h-11 rounded px-2 py-2 text-sm hover:bg-muted" to="/staff/security"><ShieldCheck className="h-4 w-4" /> Безбедност</Link></DropdownMenu.Item></DropdownMenu.Content></DropdownMenu.Portal>
+              </DropdownMenu.Root>
+              <Button variant="ghost" size="icon" aria-label="Одјава" onClick={() => logout.mutate()}><LogOut className="h-4 w-4" /></Button>
+            </div>
           </div>
         </header>
         <main id="staff-content" className="p-4 lg:p-7" tabIndex={-1}><Outlet /></main>

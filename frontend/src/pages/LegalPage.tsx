@@ -25,9 +25,9 @@ export function LegalPage({ kind }: { kind: "privacy" | "terms" }) {
   return (
     <article className="mx-auto max-w-4xl">
       <p className="eyebrow">Правни информации</p>
-      <h1 className="mt-2 text-4xl font-black md:text-5xl">{legal.data.title}</h1>
+      <h1 className="mt-2 text-4xl font-semibold md:text-5xl">{legal.data.title}</h1>
       <p className="mt-2 text-muted-foreground">Последно ажурирање: {legal.data.updated_at}</p>
-      <Card className="mt-6 border-amber-300 bg-amber-50">
+      <Card className="mt-6 rounded-none border-0 border-l-4 border-amber-400 bg-amber-50 shadow-none">
         <CardContent className="p-5 text-amber-950">
           <strong>Нацрт за MVP.</strong> {legal.data.notice}
         </CardContent>
@@ -250,7 +250,7 @@ function TermsOfUse({ operatorName, contactEmail }: { operatorName: string; cont
 function LegalSection({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section>
-      <h2 className="mb-4 text-2xl font-black">{title}</h2>
+      <h2 className="mb-4 text-2xl font-semibold">{title}</h2>
       <div className="space-y-4 text-muted-foreground">{children}</div>
     </section>
   );

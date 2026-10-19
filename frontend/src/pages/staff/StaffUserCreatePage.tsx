@@ -53,8 +53,8 @@ export function StaffUserCreatePage() {
   return (
     <section className="grid gap-8 lg:grid-cols-[360px_1fr]">
       <div>
-        <p className="eyebrow">Opštinski Inbox</p>
-        <h1 className="mt-2 text-4xl font-black">Нов службен корисник</h1>
+        <p className="font-semibold text-primary">Општински инбокс</p>
+        <h1 className="mt-2 text-4xl font-semibold">Нов службен корисник</h1>
         <p className="mt-3 text-muted-foreground">Креирај пристап за општински службеник и ограничи го според општина, одделение и улога.</p>
       </div>
       <Card>
@@ -67,7 +67,7 @@ export function StaffUserCreatePage() {
             <Field label="Улога"><Select name="role" aria-label="Улога" required>{choices.data.role_choices.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}</Select></Field>
             <Field label="Општина"><Select name="municipality" aria-label="Општина" required>{municipalities.data.map((municipality) => <option key={municipality.id} value={municipality.id}>{municipality.name}</option>)}</Select></Field>
             <Field label="Одделение"><Select name="department" aria-label="Одделение"><option value="">Без одделение</option>{choices.data.departments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}</Select></Field>
-            <p className="rounded-lg border bg-muted p-4 text-sm md:col-span-2">Корисникот мора да ја смени привремената лозинка при првата најава. Потоа може доброволно да вклучи 2FA од „Безбедност“.</p>
+            <p className="border-l-4 border-slate-300 bg-muted p-4 text-sm md:col-span-2">Корисникот мора да ја смени привремената лозинка при првата најава. Потоа може доброволно да вклучи 2FA од „Безбедност“.</p>
             <div className="flex gap-2 border-t pt-5 md:col-span-2">
               <Button disabled={createUser.isPending}><UserPlus className="h-4 w-4" /> {createUser.isPending ? "Се креира..." : "Креирај корисник"}</Button>
               <Button type="button" variant="outline" onClick={() => navigate("/staff")}>Откажи</Button>

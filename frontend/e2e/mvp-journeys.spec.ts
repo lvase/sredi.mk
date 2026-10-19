@@ -30,6 +30,7 @@ test("citizen can preview a photo, submit, and open tracking", async ({ page }) 
     buffer: ONE_PIXEL_PNG
   });
   await expect(page.getByAltText("problem.png")).toBeVisible();
+  await expect(page.getByRole("alert", { name: "Провери ги означените полиња" })).toHaveCount(0);
   await page.getByRole("button", { name: "Испрати пријава" }).click();
   await expect(page.getByRole("heading", { name: "Пријавата е примена" })).toBeVisible();
   const code = await page.locator(".font-mono").innerText();

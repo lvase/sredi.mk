@@ -1,4 +1,5 @@
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import environ
 from django.core.exceptions import ImproperlyConfigured
@@ -84,6 +85,13 @@ DATABASES = {
         "PASSWORD": env("POSTGRES_PASSWORD", default="opstinski_inbox_dev"),
         "HOST": env("POSTGRES_HOST", default="localhost"),
         "PORT": env("POSTGRES_PORT", default="5432"),
+        "CONN_MAX_AGE": env.int("DB_CONN_MAX_AGE", default=60),
+        "OPTIONS": {
+            "options": (
+                f"-c statement_timeout={env.int('DB_STATEMENT_TIMEOUT_MS', default=15000)} "
+                f"-c lock_timeout={env.int('DB_LOCK_TIMEOUT_MS', default=5000)}"
+            )
+        },
     }
 }
 
@@ -124,12 +132,79 @@ PLATFORM_OPERATOR_NAME = env("PLATFORM_OPERATOR_NAME", default="Sredi / Opštins
 PRIVACY_CONTACT_EMAIL = env("PRIVACY_CONTACT_EMAIL", default="privacy@sredi.mk")
 
 FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
-DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
+DATA_UPLOAD_MAX_MEMORY_SIZE = env.int("DATA_UPLOAD_MAX_MEMORY_SIZE", default=28 * 1024 * 1024)
 ISSUE_RATE_LIMIT_HOURLY = env.int("ISSUE_RATE_LIMIT_HOURLY", default=3)
 ISSUE_RATE_LIMIT_DAILY = env.int("ISSUE_RATE_LIMIT_DAILY", default=10)
 TRUSTED_PROXY_IPS = env.list("TRUSTED_PROXY_IPS", default=[])
 MAX_ISSUE_PHOTOS = env.int("MAX_ISSUE_PHOTOS", default=5)
 MAX_ISSUE_IMAGE_SIZE_BYTES = env.int("MAX_ISSUE_IMAGE_SIZE_BYTES", default=5 * 1024 * 1024)
+ISSUE_IMAGE_MAX_PIXEL_COUNT = env.int("ISSUE_IMAGE_MAX_PIXEL_COUNT", default=24_000_000)
+ISSUE_IMAGE_MAX_LONG_EDGE = env.int("ISSUE_IMAGE_MAX_LONG_EDGE", default=2048)
+ISSUE_IMAGE_MIN_LONG_EDGE = env.int("ISSUE_IMAGE_MIN_LONG_EDGE", default=1024)
+ISSUE_IMAGE_MAX_OUTPUT_SIZE_BYTES = env.int(
+    "ISSUE_IMAGE_MAX_OUTPUT_SIZE_BYTES", default=800 * 1024
+)
+ISSUE_TEXT_BODY_LIMIT_BYTES = env.int("ISSUE_TEXT_BODY_LIMIT_BYTES", default=1024 * 1024)
+
+REDIS_URL = env("REDIS_URL", default="")
+RATE_LIMIT_CACHE_ALIAS = "rate_limits"
+if REDIS_URL:
+    redis_parts = urlsplit(REDIS_URL)
+
+    def redis_database_url(database):
+        return urlunsplit(redis_parts._replace(path=f"/{database}"))
+
+    CACHES = {
+        "default": {
+            "BACKEND": "django_redis.cache.RedisCache",
+            "LOCATION": redis_database_url(1),
+            "OPTIONS": {"CLIENT_CLASS": "django_redis.client.DefaultClient"},
+            "TIMEOUT": 300,
+        },
+        "rate_limits": {
+            "BACKEND": "django_redis.cache.RedisCache",
+            "LOCATION": redis_database_url(2),
+            "OPTIONS": {"CLIENT_CLASS": "django_redis.client.DefaultClient"},
+            "TIMEOUT": 900,
+        },
+    }
+else:
+    CACHES = {
+        "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"},
+        "rate_limits": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "sredi-rate-limits",
+        },
+    }
+
+CELERY_BROKER_URL = env("CELERY_BROKER_URL", default=REDIS_URL or "memory://")
+CELERY_RESULT_BACKEND = env("CELERY_RESULT_BACKEND", default=REDIS_URL or "cache+memory://")
+CELERY_TASK_ACKS_LATE = True
+CELERY_TASK_REJECT_ON_WORKER_LOST = True
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+CELERY_TASK_TIME_LIMIT = env.int("CELERY_TASK_TIME_LIMIT", default=300)
+CELERY_WORKER_MAX_TASKS_PER_CHILD = env.int("CELERY_WORKER_MAX_TASKS_PER_CHILD", default=100)
+CELERY_RESULT_EXPIRES = env.int("CELERY_RESULT_EXPIRES", default=3600)
+STORAGE_WARNING_PERCENT = env.int("STORAGE_WARNING_PERCENT", default=70)
+STORAGE_URGENT_PERCENT = env.int("STORAGE_URGENT_PERCENT", default=80)
+STORAGE_CRITICAL_PERCENT = env.int("STORAGE_CRITICAL_PERCENT", default=90)
+STORAGE_MONITOR_ENABLED = env.bool("STORAGE_MONITOR_ENABLED", default=PRODUCTION)
+OPERATIONS_ALERT_EMAILS = env.list("OPERATIONS_ALERT_EMAILS", default=[])
+MEDIA_MAINTENANCE_LOCK_ID = env.int("MEDIA_MAINTENANCE_LOCK_ID", default=734733)
+CELERY_BEAT_SCHEDULE = {
+    "attachment-retention-daily": {
+        "task": "apps.issues.tasks.run_attachment_retention",
+        "schedule": 24 * 60 * 60,
+    },
+    "legacy-counter-pruning-daily": {
+        "task": "apps.issues.tasks.prune_legacy_counters",
+        "schedule": 24 * 60 * 60,
+    },
+    "storage-monitor-quarter-hour": {
+        "task": "apps.issues.tasks.monitor_storage",
+        "schedule": 15 * 60,
+    },
+}
 
 SESSION_COOKIE_HTTPONLY = True
 CSRF_COOKIE_HTTPONLY = True
@@ -162,6 +237,8 @@ if PRODUCTION:
         production_errors.append("SMTP host and sender must be configured")
     if not CSRF_TRUSTED_ORIGINS or any(not origin.startswith("https://") for origin in CSRF_TRUSTED_ORIGINS):
         production_errors.append("CSRF_TRUSTED_ORIGINS must contain HTTPS origins")
+    if not REDIS_URL:
+        production_errors.append("REDIS_URL is required for shared throttling and task queues")
     if production_errors:
         raise ImproperlyConfigured("Invalid production configuration: " + "; ".join(production_errors))
 
@@ -193,11 +270,6 @@ LOGGING = {
             "propagate": False,
         },
         "apps.issues": {
-            "handlers": ["console"],
-            "level": "INFO",
-            "propagate": False,
-        },
-        "sredi.request": {
             "handlers": ["console"],
             "level": "INFO",
             "propagate": False,

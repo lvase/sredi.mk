@@ -1,7 +1,20 @@
 {
   "name": "Општина Радовиш",
   "slug": "radovis",
-  "settlements": ["Радовиш"],
+  "settlements": [
+    "Радовиш",
+    "Бучим",
+    "Воиславци",
+    "Дамјан",
+    "Злеово",
+    "Ињево",
+    "Јаргулица",
+    "Калуѓерица",
+    "Ораовица",
+    "Подареш",
+    "Покрајчево",
+    "Сулдурци"
+  ],
   "departments": [
     {"name": "Комунални работи"},
     {"name": "Јавно осветлување"},
@@ -16,5 +29,5 @@
     {"name": "Паркови и зеленило", "default_department": "Комунални работи"},
     {"name": "Друго", "default_department": "Администрација"}
   ],
-  "sla": {"triage_hours": 24, "first_response_hours": 48, "resolution_hours": 240}
+  "response_targets": {"review_hours": 24, "resolution_hours": 240}
 }

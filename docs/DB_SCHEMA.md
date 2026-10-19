@@ -11,7 +11,7 @@ This document is the detailed database design for **Opštinski Inbox / Sredi**. 
 - Support municipality-wide defaults with category-specific overrides.
 - Store uploaded files outside PostgreSQL while retaining file metadata and ownership in PostgreSQL.
 - Make privacy retention enforceable per municipality.
-- Keep the MVP synchronous and transactional; Redis, Celery, and event-bus tables are intentionally absent.
+- Keep report writes transactional while using Redis for shared caches/throttles and Celery for email, retention, cleanup, and monitoring.
 
 ## 2. Conventions
 
@@ -177,12 +177,10 @@ erDiagram
         timestamptz created_at
     }
 
-    SLA_POLICY {
+    RESPONSE_TARGET {
         bigint id PK
-        bigint municipality_id FK
-        bigint category_id FK
-        integer triage_hours
-        integer first_response_hours
+        bigint municipality_id FK, UK
+        integer review_hours
         integer resolution_hours
     }
 
@@ -231,7 +229,7 @@ erDiagram
     MUNICIPALITY o|--o{ STAFF_PROFILE : employs
     MUNICIPALITY o|--o{ ISSUE_CATEGORY : defines
     MUNICIPALITY ||--o{ ISSUE : owns
-    MUNICIPALITY ||--o{ SLA_POLICY : configures
+    MUNICIPALITY ||--o| RESPONSE_TARGET : configures
     MUNICIPALITY ||--o| DATA_RETENTION_POLICY : retains_by
     MUNICIPALITY ||--o{ SUBMISSION_RATE_LIMIT : throttles
     MUNICIPALITY o|--o{ AUDIT_LOG : scopes
@@ -241,7 +239,6 @@ erDiagram
     DEPARTMENT o|--o{ ISSUE : receives
     SETTLEMENT ||--o{ ISSUE : locates
     ISSUE_CATEGORY ||--o{ ISSUE : classifies
-    ISSUE_CATEGORY o|--o{ SLA_POLICY : overrides
 
     ISSUE ||--o{ ISSUE_ATTACHMENT : has
     ISSUE ||--o{ ISSUE_STATUS_EVENT : history
@@ -271,7 +268,7 @@ Top-level municipality configuration and the primary data-ownership boundary.
 | `created_at` | timestamptz | generated | Creation time |
 | `updated_at` | timestamptz | generated | Last model save time |
 
-Delete behavior: dependent settlements, departments, notices, SLA policies, retention policies, and rate-limit rows cascade. Issues protect the municipality from deletion while reports exist.
+Delete behavior: dependent settlements, departments, notices, response targets, retention policies, and rate-limit rows cascade. Issues protect the municipality from deletion while reports exist.
 
 ### 4.2 `municipalities_municipalitypublicnotice`
 
@@ -357,7 +354,7 @@ Issue taxonomy. A null `municipality_id` represents a shared/global category; ot
 
 The private `title` remains operational data. `public_title`, `public_title_approved_at`, and `public_title_approved_by_id` form a separate moderation record; a report is absent from public latest-report lists until these approval fields are present.
 
-Central case/report record. It contains the citizen submission, current workflow projection, optional contact information, assignment, SLA timestamps, and privacy-retention markers.
+Central case/report record. It contains the citizen submission, current workflow projection, optional contact information, assignment, workflow timestamps, and privacy-retention markers.
 
 | Column | Type | Null/default | Rules and purpose |
 |---|---|---|---|
@@ -386,27 +383,40 @@ Central case/report record. It contains the citizen submission, current workflow
 | `assigned_to_id` | integer | nullable | FK → `auth_user.id`, `ON DELETE SET NULL` |
 | `public_resolution_note` | text | empty string | Public-facing resolution/update text |
 | `internal_note` | text | empty string | Staff-only case note |
-| `submitted_at` | timestamptz | generated | Submission and SLA origin time |
+| `submitted_at` | timestamptz | generated | Submission and response-target origin time |
 | `triaged_at` | timestamptz | nullable | First accepted/rejected/out-of-jurisdiction time |
 | `assigned_at` | timestamptz | nullable | First assigned state or assignment time |
 | `resolved_at` | timestamptz | nullable | First resolved time |
-| `closed_at` | timestamptz | nullable | First closed time; retention is calculated from this |
+| `closed_at` | timestamptz | nullable | First closed time |
+| `attachment_retention_started_at` | timestamptz | nullable | First entry into a final status; cleared on reopening |
+| `version` | positive integer | `1` | Optimistic-concurrency version for staff mutations |
 | `updated_at` | timestamptz | generated | Last model save time |
 
 Statuses: `pending_triage`, `accepted`, `assigned`, `in_progress`, `resolved`, `closed`, `duplicate`, `rejected_spam`, `not_jurisdiction`, `waiting_citizen`, `waiting_external`, and `procurement_needed`.
 
 ### 4.9 `issues_issueattachment`
 
-Private photo metadata. The `image` value is a storage key such as `issues/<tracking-code>/<random-token>.jpg`; bytes are not stored in PostgreSQL.
+Private photo metadata. The `image` value is a randomized storage key such as `issues/<tracking-code>/<random-token>.webp`; bytes are not stored in PostgreSQL.
 
 | Column | Type | Null/default | Rules and purpose |
 |---|---|---|---|
 | `id` | bigint | NN | PK |
 | `issue_id` | bigint | NN | FK → issue, `ON DELETE CASCADE` |
 | `image` | varchar(100) | NN | Private storage key |
+| `original_size_bytes` | positive bigint | nullable | Input byte size before normalization; null on unmigrated legacy rows |
+| `stored_size_bytes` | positive bigint | nullable | Stored WebP byte size |
+| `processed_width` | positive integer | nullable | Stored pixel width |
+| `processed_height` | positive integer | nullable | Stored pixel height |
+| `stored_format` | varchar(16) | nullable | Normalized format (`WEBP`) |
+| `processing_version` | positive smallint | nullable, indexed | Idempotency marker for the processing profile |
+| `deletion_state` | varchar(24) | `active` | Active, deletion-pending, deleted, or deletion-failed tombstone state |
+| `deletion_started_at` | timestamptz | nullable | Start of the two-phase delete |
+| `deleted_at` | timestamptz | nullable | Successful storage deletion time |
+| `deletion_reason` | varchar(160) | empty string | Stable retention/deletion reason |
+| `deletion_error` | text | empty string | Retry-safe storage error class; never a filename |
 | `uploaded_at` | timestamptz | generated | Upload time |
 
-The application accepts at most 5 JPG/PNG/WEBP images per submission, each at most 5 MB by default, and verifies image content with Pillow. These are service rules, not database constraints.
+The application accepts at most 5 JPG/PNG/WEBP images per submission, each at most 5 MB and 24 megapixels by default. Pillow applies EXIF orientation, strips metadata, limits the longest edge to 2048 px without upscaling, and stores only a WebP of at most 800 KiB. Corrupt, spoofed, animated, and oversized images are rejected. These are service rules, not database constraints.
 
 ### 4.10 `issues_issuestatusevent`
 
@@ -447,24 +457,22 @@ Self-referencing relation between a duplicate report and the canonical report.
 | `created_by_id` | integer | NN | FK → `auth_user.id`, `ON DELETE PROTECT` |
 | `created_at` | timestamptz | generated | Link time |
 
-### 4.13 `issues_slapolicy`
+### 4.13 `issues_responsetarget`
 
-Municipality SLA configuration. A null category row is the municipality default; a category row overrides it.
+Simple internal response targets for one municipality. Targets help staff prioritize work; they are not contractual delivery guarantees.
 
 | Column | Type | Null/default | Rules and purpose |
 |---|---|---|---|
 | `id` | bigint | NN | PK |
-| `municipality_id` | bigint | NN | FK → municipality, `ON DELETE CASCADE` |
-| `category_id` | bigint | nullable | FK → category, `ON DELETE CASCADE` |
-| `triage_hours` | positive integer | `24` | Pending-triage deadline |
-| `first_response_hours` | positive integer | `48` | Reserved first-response target |
+| `municipality_id` | bigint | NN | UQ FK → municipality, `ON DELETE CASCADE` |
+| `review_hours` | positive integer | `24` | Target for reviewing a pending report |
 | `resolution_hours` | positive integer | `240` | Non-triage resolution deadline |
 
-Lookup order is category-specific policy → municipality default → hard-coded 24/240 hour fallback.
+Each municipality has at most one row. Runtime fallback values are 24 review hours and 240 resolution hours.
 
 ### 4.14 `issues_submissionratelimit`
 
-Atomic per-municipality/per-network submission counters. The row is locked with `SELECT ... FOR UPDATE` during consumption.
+Legacy rollback-only per-municipality/per-network submission counters. New requests use atomic Redis counters with TTLs; these rows are no longer created and are pruned after 48 hours.
 
 | Column | Type | Null/default | Rules and purpose |
 |---|---|---|---|
@@ -488,7 +496,7 @@ One policy per municipality.
 | `id` | bigint | NN | PK |
 | `municipality_id` | bigint | NN | UQ FK → municipality, `ON DELETE CASCADE` |
 | `contact_retention_days` | positive integer | `365` | Days after closure before contact/hash anonymization |
-| `attachment_retention_days` | positive integer | `1825` | Days after closure before files and attachment rows are deleted |
+| `attachment_retention_days` | positive integer | `90` | Days after final-status entry, or submission while unresolved, before attachment bytes are removed |
 | `updated_at` | timestamptz | generated | Policy update time |
 
 ### 4.16 `issues_auditlog`
@@ -529,8 +537,7 @@ The following database constraints are recommended before production. They are d
 - `Issue.assigned_to.staff_profile.municipality_id = Issue.municipality_id` when assigned.
 - `StaffProfile.department.municipality_id = StaffProfile.municipality_id` when a department is set.
 - `IssueCategory.default_department.municipality_id = IssueCategory.municipality_id`; global categories need an explicit rule for defaults.
-- One SLA default per municipality and one override per (`municipality_id`, `category_id`).
-- `SlaPolicy.category.municipality_id` must equal the SLA municipality.
+- One response-target row per municipality configuration.
 - `IssueDuplicateLink.issue_id <> duplicate_of_id`, both issues must share a municipality, and the pair must be unique.
 - A published notice must have `published_at IS NOT NULL`.
 - `suspicious_score BETWEEN 0 AND 100` and rate-limit counters must be nonnegative.
@@ -560,7 +567,7 @@ Django also creates indexes for foreign-key columns and unique constraints.
 | `issues_issue` | (`municipality_id`, `status`, `submitted_at DESC`) | Status-filtered inbox pages |
 | `issues_issue` | (`assigned_to_id`, `status`, `submitted_at DESC`) WHERE `assigned_to_id IS NOT NULL` | “My issues” |
 | `issues_issue` | (`assigned_department_id`, `status`, `submitted_at DESC`) WHERE `assigned_department_id IS NOT NULL` | Department queues |
-| `issues_issue` | (`municipality_id`, `category_id`, `submitted_at`) | Category statistics and SLA reporting |
+| `issues_issue` | (`municipality_id`, `category_id`, `submitted_at`) | Category statistics and response-time reporting |
 | `issues_issue` | (`municipality_id`, `is_spam`, `submitted_at`) | Public statistics |
 | `issues_issuestatusevent` | (`issue_id`, `created_at`) | Citizen/staff timeline |
 | `issues_issuecomment` | (`issue_id`, `is_internal`, `created_at`) | Public versus internal timeline |
@@ -573,12 +580,12 @@ For staff free-text search at larger volume, add PostgreSQL trigram GIN indexes 
 
 ## 7. Transaction and consistency boundaries
 
-- Rate-limit consumption locks one (`municipality_id`, `ip_hash`) row and updates counters atomically.
+- Rate-limit consumption uses atomic Redis fixed-window increments with expiring keys.
 - Rate-limit consumption commits before issue creation, so a later issue-write failure still consumes an attempt.
-- Issue creation plus attachment metadata creation runs in one database transaction. File storage itself may not roll back with PostgreSQL, so production object-storage cleanup should handle orphaned objects.
+- Images are fully processed before issue creation. Issue and attachment rows are written in one database transaction; any files written before a database/storage failure are tracked and deleted on rollback.
 - Bulk assignment locks selected issues and updates at most 100 reports in one transaction.
-- Status projection, `IssueStatusEvent`, and `AuditLog` are separate database writes without an explicit outer transaction in the current status API. Wrap them together before production to prevent partial history.
-- Retention processes each issue in its own transaction with a row lock, then writes an audit record.
+- Version-checked staff mutations lock the issue and commit the projection, history event, and audit row atomically.
+- Retention marks each attachment deletion-pending under a row lock, deletes storage after commit, and preserves a deleted or retryable-failed tombstone.
 
 ## 8. Privacy and visibility boundaries
 

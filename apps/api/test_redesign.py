@@ -3,13 +3,19 @@ from unittest.mock import patch
 
 import pytest
 from django.contrib.auth import get_user_model
-from django.core import mail
 from django.core.exceptions import ValidationError
 from django.test import override_settings
 from django.utils import timezone
 
 from apps.accounts.models import StaffProfile, StaffRole
-from apps.issues.models import Issue, IssueCategory, IssueStatus, SlaPolicy
+from apps.issues.models import (
+    Issue,
+    IssueCategory,
+    IssueStatus,
+    ReceiptDelivery,
+    ReceiptDeliveryState,
+    ResponseTarget,
+)
 from apps.municipalities.models import (
     Department,
     Municipality,
@@ -43,6 +49,30 @@ def make_issue(municipality, settlement, category, **kwargs):
     }
     values.update(kwargs)
     return Issue.objects.create(**values)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("municipality_name", "slug", "namesake"),
+    [
+        ("Општина Радовиш", "radovis", "Радовиш"),
+        ("Општина Конче", "konce", "Конче"),
+    ],
+)
+def test_form_options_put_municipality_namesake_first(
+    client, municipality_name, slug, namesake
+):
+    municipality = Municipality.objects.create(name=municipality_name, slug=slug)
+    Settlement.objects.create(municipality=municipality, name="А населба")
+    Settlement.objects.create(municipality=municipality, name=namesake)
+    Settlement.objects.create(municipality=municipality, name="Ш населба")
+
+    response = client.get(f"/api/municipalities/{slug}/form-options/")
+
+    assert response.status_code == 200
+    settlements = response.json()["data"]["settlements"]
+    assert settlements[0]["name"] == namesake
+    assert {item["name"] for item in settlements[1:]} == {"А населба", "Ш населба"}
 
 
 @pytest.mark.django_db
@@ -122,10 +152,11 @@ def test_receipt_opt_in_and_email_failure_are_non_fatal(client, municipal_data):
     }
     response = client.post(f"/api/municipalities/{municipality.slug}/issues/", payload)
     assert response.status_code == 201
-    assert response.json()["data"]["receipt_delivery"] == "sent"
-    assert response.json()["data"]["tracking_code"] in mail.outbox[0].body
+    assert response.json()["data"]["receipt_delivery"] == "queued"
+    delivery = ReceiptDelivery.objects.get(issue__tracking_code=response.json()["data"]["tracking_code"])
+    assert delivery.state == ReceiptDeliveryState.QUEUED
 
-    with patch("apps.api.views.send_mail", side_effect=RuntimeError("mail unavailable")):
+    with patch("apps.api.views.queue_receipt_delivery", side_effect=RuntimeError("queue unavailable")):
         failed = client.post(
             f"/api/municipalities/{municipality.slug}/issues/",
             {**payload, "title": "Втор проблем", "location_text": "Друга локација"},
@@ -140,7 +171,7 @@ def test_receipt_opt_in_and_email_failure_are_non_fatal(client, municipal_data):
 def test_statistics_are_aggregate_suppressed_filtered_and_privacy_safe(client, municipal_data):
     municipality, settlement, category, _ = municipal_data
     now = timezone.now()
-    SlaPolicy.objects.create(municipality=municipality, resolution_hours=72)
+    ResponseTarget.objects.create(municipality=municipality, resolution_hours=72)
     for index in range(6):
         issue = make_issue(
             municipality,
@@ -184,9 +215,9 @@ def test_statistics_are_aggregate_suppressed_filtered_and_privacy_safe(client, m
         "status_label",
     }
     assert data["performance"] == {
-        "median_first_response_hours": 4.0,
+        "median_review_hours": 4.0,
         "median_resolution_hours": 60.0,
-        "resolved_within_sla_percent": 100.0,
+        "resolved_within_target_percent": 100.0,
     }
     assert data["by_settlement"] == [{"label": "Центар", "total": 6, "suppressed": False}]
     assert data["suppression"]["suppressed_settlement_groups"] == 1
@@ -231,7 +262,7 @@ def test_statistics_recent_reports_are_capped_at_twenty(client, municipal_data):
 
 
 @pytest.mark.django_db
-def test_staff_search_sort_pagination_and_exact_sla_metrics(client, municipal_data):
+def test_staff_search_sort_pagination_and_exact_response_targets(client, municipal_data):
     municipality, settlement, category, _ = municipal_data
     user = get_user_model().objects.create_user(username="coordinator", password="testpass")
     StaffProfile.objects.create(
@@ -239,10 +270,9 @@ def test_staff_search_sort_pagination_and_exact_sla_metrics(client, municipal_da
         municipality=municipality,
         role=StaffRole.COORDINATOR,
     )
-    SlaPolicy.objects.create(
+    ResponseTarget.objects.create(
         municipality=municipality,
-        category=category,
-        triage_hours=1,
+        review_hours=1,
         resolution_hours=10,
     )
     for index in range(31):
@@ -303,7 +333,10 @@ def test_bulk_assignment_is_atomic_and_municipality_isolated(client, municipal_d
     rejected = client.post(
         "/api/staff/issues/bulk-assign/",
         {
-            "issue_ids": [local_issue.id, foreign_issue.id],
+            "issues": [
+                {"id": local_issue.id, "expected_version": local_issue.version},
+                {"id": foreign_issue.id, "expected_version": foreign_issue.version},
+            ],
             "department_id": department.id,
             "assignee_id": assignee.id,
         },
@@ -317,7 +350,10 @@ def test_bulk_assignment_is_atomic_and_municipality_isolated(client, municipal_d
     accepted = client.post(
         "/api/staff/issues/bulk-assign/",
         {
-            "issue_ids": [local_issue.id, second_local.id],
+            "issues": [
+                {"id": local_issue.id, "expected_version": local_issue.version},
+                {"id": second_local.id, "expected_version": second_local.version},
+            ],
             "department_id": department.id,
             "assignee_id": assignee.id,
         },

@@ -1,25 +1,25 @@
 import hashlib
 import ipaddress
-import math
+import logging
 from dataclasses import dataclass
 from datetime import timedelta
-from pathlib import Path
 
 from django.conf import settings
-from django.db import transaction
 from django.utils import timezone
 from django.utils.crypto import constant_time_compare
-from PIL import Image, UnidentifiedImageError
 
 from apps.accounts.models import StaffRole
 from apps.issues.models import (
+    DEFAULT_RESOLUTION_TARGET_HOURS,
+    DEFAULT_REVIEW_TARGET_HOURS,
+    FINAL_ISSUE_STATUSES,
     AuditLog,
     Issue,
     IssueComment,
     IssueStatus,
-    SlaPolicy,
-    SubmissionRateLimit,
+    ResponseTarget,
 )
+from config.throttling import increment_fixed_window
 
 TRIAGE_ROLES = {
     StaffRole.MUNICIPALITY_ADMIN,
@@ -40,10 +40,7 @@ SENSITIVE_STATUS_NOTE_REQUIRED = {
 }
 MAX_SUBMISSIONS_PER_HOUR = settings.ISSUE_RATE_LIMIT_HOURLY
 MAX_SUBMISSIONS_PER_DAY = settings.ISSUE_RATE_LIMIT_DAILY
-MAX_PHOTOS_PER_ISSUE = settings.MAX_ISSUE_PHOTOS
-ALLOWED_IMAGE_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
-ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
-MAX_IMAGE_SIZE_BYTES = getattr(settings, "MAX_ISSUE_IMAGE_SIZE_BYTES", 5 * 1024 * 1024)
+audit_logger = logging.getLogger("apps.issues.audit")
 
 
 @dataclass(frozen=True)
@@ -174,6 +171,19 @@ def can_moderate_public_title(user, issue):
     )
 
 
+def can_manage_legal_hold(user, issue):
+    if not can_staff_access_issue(user, issue):
+        return False
+    if user.is_superuser:
+        return True
+    profile = getattr(user, "staffprofile", None)
+    return bool(
+        profile
+        and profile.municipality_id == issue.municipality_id
+        and profile.role in {StaffRole.MUNICIPALITY_ADMIN, StaffRole.COORDINATOR}
+    )
+
+
 def public_status_label(status):
     labels = {
         IssueStatus.PENDING_TRIAGE: "Примена",
@@ -203,64 +213,33 @@ def tracking_code_matches(issue, raw_code):
     )
 
 
-@transaction.atomic
 def consume_submission_rate_limit(municipality, ip_hash):
-    now = timezone.now()
-    limit, _ = SubmissionRateLimit.objects.select_for_update().get_or_create(
-        municipality=municipality,
-        ip_hash=ip_hash,
-        defaults={"window_start": now},
-    )
-    if now - limit.window_start >= timedelta(days=1):
-        limit.window_start = now
-        limit.hour_count = 0
-        limit.day_count = 0
-    elif limit.last_submission_at and now - limit.last_submission_at >= timedelta(hours=1):
-        limit.hour_count = 0
-
-    allowed = (
-        limit.hour_count < MAX_SUBMISSIONS_PER_HOUR
-        and limit.day_count < MAX_SUBMISSIONS_PER_DAY
-    )
-    if allowed:
-        limit.hour_count += 1
-        limit.day_count += 1
-        limit.last_submission_at = timezone.now()
+    created_marker = getattr(municipality, "created_at", None)
+    identity = f"{municipality.pk}:{created_marker.timestamp() if created_marker else 0}:{ip_hash}"
+    hour_count, hour_retry = increment_fixed_window("submission-hour", identity, 60 * 60)
+    day_count, day_retry = increment_fixed_window("submission-day", identity, 24 * 60 * 60)
+    allowed = hour_count <= MAX_SUBMISSIONS_PER_HOUR and day_count <= MAX_SUBMISSIONS_PER_DAY
     retry_waits = []
-    if not allowed and limit.hour_count >= MAX_SUBMISSIONS_PER_HOUR and limit.last_submission_at:
-        retry_waits.append((limit.last_submission_at + timedelta(hours=1) - now).total_seconds())
-    if not allowed and limit.day_count >= MAX_SUBMISSIONS_PER_DAY:
-        retry_waits.append((limit.window_start + timedelta(days=1) - now).total_seconds())
+    if hour_count > MAX_SUBMISSIONS_PER_HOUR:
+        retry_waits.append(hour_retry)
+    if day_count > MAX_SUBMISSIONS_PER_DAY:
+        retry_waits.append(day_retry)
     state = SubmissionRateState(
-        hour_count=limit.hour_count - (1 if allowed else 0),
-        day_count=limit.day_count - (1 if allowed else 0),
-        retry_after_seconds=max(1, math.ceil(max(retry_waits, default=0))) if not allowed else 0,
+        hour_count=max(0, hour_count - 1),
+        day_count=max(0, day_count - 1),
+        retry_after_seconds=max(retry_waits, default=0) if not allowed else 0,
     )
-    limit.save(update_fields=["hour_count", "day_count", "last_submission_at", "window_start", "updated_at"])
     return allowed, state
 
 
 def validate_issue_uploads(files):
-    errors = []
-    if len(files) > MAX_PHOTOS_PER_ISSUE:
-        errors.append("Може да прикачиш најмногу 5 фотографии.")
-    for file in files[:MAX_PHOTOS_PER_ISSUE]:
-        suffix = Path(file.name).suffix.lower()
-        if suffix not in ALLOWED_IMAGE_EXTENSIONS:
-            errors.append("Дозволени се само JPG, PNG или WEBP фотографии.")
-            continue
-        content_type = getattr(file, "content_type", "")
-        if content_type and content_type not in ALLOWED_IMAGE_CONTENT_TYPES:
-            errors.append("Фотографиите мора да бидат JPG, PNG или WEBP.")
-        if file.size > MAX_IMAGE_SIZE_BYTES:
-            errors.append("Секоја фотографија мора да биде помала од 5 MB.")
-        try:
-            Image.open(file).verify()
-        except (UnidentifiedImageError, OSError):
-            errors.append("Една од фотографиите не може да се прочита како валидна слика.")
-        finally:
-            file.seek(0)
-    return errors
+    from apps.issues.image_processing import IssueImageValidationError, prepare_issue_images
+
+    try:
+        prepare_issue_images(files)
+    except IssueImageValidationError as exc:
+        return exc.errors
+    return []
 
 
 def calculate_suspicious_assessment(
@@ -338,37 +317,41 @@ def calculate_suspicious_assessment(
 
 
 def is_issue_overdue(issue):
-    if issue.status in {IssueStatus.RESOLVED, IssueStatus.CLOSED}:
+    if hasattr(issue, "target_overdue"):
+        return bool(issue.target_overdue)
+    if issue.status in FINAL_ISSUE_STATUSES:
         return False
-    policy = (
-        SlaPolicy.objects.filter(municipality=issue.municipality, category=issue.category).first()
-        or SlaPolicy.objects.filter(municipality=issue.municipality, category__isnull=True).first()
+    target = ResponseTarget.objects.filter(municipality=issue.municipality).first()
+    review_hours = (
+        target.review_hours if target else DEFAULT_REVIEW_TARGET_HOURS
     )
-    triage_hours = policy.triage_hours if policy else 24
-    resolution_hours = policy.resolution_hours if policy else 240
+    resolution_hours = (
+        target.resolution_hours if target else DEFAULT_RESOLUTION_TARGET_HOURS
+    )
     age = timezone.now() - issue.submitted_at
     if issue.status == IssueStatus.PENDING_TRIAGE:
-        return age > timedelta(hours=triage_hours)
+        return age > timedelta(hours=review_hours)
     return age > timedelta(hours=resolution_hours)
 
 
-def issue_sla_deadline(issue):
-    """Return the active triage/resolution deadline using category then municipal fallback."""
-    if issue.status in {IssueStatus.RESOLVED, IssueStatus.CLOSED}:
+def issue_response_deadline(issue):
+    """Return the active municipality review or resolution target."""
+    if hasattr(issue, "target_deadline"):
+        return None if issue.status in FINAL_ISSUE_STATUSES else issue.target_deadline
+    if issue.status in FINAL_ISSUE_STATUSES:
         return None
-    policy = (
-        SlaPolicy.objects.filter(municipality=issue.municipality, category=issue.category).first()
-        or SlaPolicy.objects.filter(municipality=issue.municipality, category__isnull=True).first()
-    )
+    target = ResponseTarget.objects.filter(municipality=issue.municipality).first()
     if issue.status == IssueStatus.PENDING_TRIAGE:
-        hours = policy.triage_hours if policy else 24
+        hours = target.review_hours if target else DEFAULT_REVIEW_TARGET_HOURS
     else:
-        hours = policy.resolution_hours if policy else 240
+        hours = target.resolution_hours if target else DEFAULT_RESOLUTION_TARGET_HOURS
     return issue.submitted_at + timedelta(hours=hours)
 
 
 def is_issue_due_soon(issue, *, hours=24):
-    deadline = issue_sla_deadline(issue)
+    if hours == 24 and hasattr(issue, "target_due_soon"):
+        return bool(issue.target_due_soon)
+    deadline = issue_response_deadline(issue)
     if deadline is None:
         return False
     now = timezone.now()
@@ -389,14 +372,26 @@ def apply_default_department(issue, status):
 
 
 def write_audit_log(actor, action, issue=None, municipality=None, metadata=None):
-    AuditLog.objects.create(
-        municipality=municipality or getattr(issue, "municipality", None),
+    target_municipality = municipality or getattr(issue, "municipality", None)
+    audit = AuditLog.objects.create(
+        municipality=target_municipality,
         actor=actor if getattr(actor, "is_authenticated", False) else None,
         action=action,
         object_type=issue.__class__.__name__ if issue else "",
         object_id=str(issue.pk) if issue else "",
         metadata=metadata or {},
     )
+    audit_logger.info(
+        "audit_event",
+        extra={
+            "action": action,
+            "actor_id": getattr(actor, "pk", None),
+            "municipality_id": getattr(target_municipality, "pk", None),
+            "object_type": audit.object_type,
+            "object_id": audit.object_id,
+        },
+    )
+    return audit
 
 
 def publish_resolution_note_update(issue, actor, previous_note):
