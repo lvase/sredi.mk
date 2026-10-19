@@ -63,6 +63,17 @@ ISSUE_RATE_LIMIT_DAILY=10
 TRUSTED_PROXY_IPS=10.0.0.0/8,192.0.2.10
 ```
 
+## Text-only pilot
+
+Citizen photo uploads are disabled by default through `Municipality.photo_uploads_enabled`.
+Apply migrations when updating an existing development checkout:
+
+```bash
+docker compose exec web python manage.py migrate
+```
+
+The form hides photo controls, submits text as JSON, and the API and legacy form reject uploaded files when the municipality setting is off. Existing attachments remain private and available to authorized staff. Municipal crests are unaffected. See [pilot operations](docs/PILOT_OPERATIONS.md#text-only-pilot) before enabling photos later.
+
 ## Privacy and municipality configuration
 
 - Uploaded issue photos are available only through authenticated staff API routes; do not expose `MEDIA_ROOT` directly from a reverse proxy.

@@ -76,6 +76,7 @@ class MunicipalityAdmin(admin.ModelAdmin):
         "name",
         "slug",
         "is_active",
+        "photo_uploads_enabled",
         "configuration_status",
         "configuration_verified_at",
     ]
@@ -89,6 +90,7 @@ class MunicipalityAdmin(admin.ModelAdmin):
     search_fields = ["name"]
     fieldsets = [
         (None, {"fields": ("name", "slug", "is_active")}),
+        ("Функции", {"fields": ("photo_uploads_enabled",)}),
         (
             "Одобрено јавно брендирање",
             {

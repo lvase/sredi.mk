@@ -49,6 +49,7 @@ class MunicipalitySerializer(serializers.ModelSerializer):
             "name",
             "slug",
             "configuration_status",
+            "photo_uploads_enabled",
             "public_accent_color",
             "official_coat_of_arms_url",
             "active_report_count",

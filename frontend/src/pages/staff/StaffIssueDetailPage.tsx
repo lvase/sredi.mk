@@ -274,7 +274,7 @@ export function StaffIssueDetailPage() {
         <aside className="case-action-rail self-start xl:sticky xl:top-24">
           <Card><CardContent className="p-5"><h2 className="mb-3 font-semibold">Задолжување</h2><Info label="Одделение" value={issue.data.assigned_department || "Не е доделено"} /><Info label="Вработен" value={issue.data.assigned_to || "Не е доделен"} /></CardContent></Card>
           <Card><CardContent className="p-5"><h2 className="mb-3 font-semibold">Контакт</h2>{issue.data.is_anonymous ? <p className="text-muted-foreground">Анонимна пријава.</p> : <><Info label="Име" value={issue.data.citizen_name || "-"} /><Info label="Е-пошта" value={issue.data.citizen_email || "-"} /><Info label="Телефон" value={issue.data.citizen_phone || "-"} /></>}</CardContent></Card>
-          {issue.data.permissions.can_manage_legal_hold ? (
+          {issue.data.permissions.can_manage_legal_hold && (issue.data.attachments.length > 0 || issue.data.legal_hold_active) ? (
             <Card><CardContent className="p-5">
               <h2 className="mb-2 font-semibold">Правно задржување</h2>
               <p className="mb-3 text-sm text-muted-foreground">Активното задржување го запира бришењето на фотографиите.</p>

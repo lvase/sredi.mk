@@ -14,6 +14,7 @@ export type Municipality = {
   name: string;
   slug: string;
   configuration_status: "unverified" | "verified";
+  photo_uploads_enabled: boolean;
   public_accent_color: string;
   official_coat_of_arms_url: string | null;
   active_report_count: number;

@@ -90,3 +90,10 @@ Before resuming work, inspect the actual repository state rather than assuming t
 - Substantial UI, backend, and infrastructure work remains uncommitted. No initial push was performed during repository connection.
 - The suggested first checkpoint branch is `feat/pilot-foundation`. Review and organize the existing changes before committing them; this checkpoint is not a declaration of production readiness.
 - The next planned implementation is a text-only pilot. Photo uploads remain implemented and have not yet been disabled.
+
+### Checkpoint completed on 2026-10-19
+
+- Checkpoint branch `feat/pilot-foundation` was pushed at `d726ab6`.
+- PR #1 was squash-merged into `develop` at `1004157`.
+- `main` was published at the original `f68fb79` baseline, with no production release or deployment.
+- Photo-free pilot implementation proceeds separately on `feat/text-only-pilot`. Inspect GitHub and local Git for its latest status.

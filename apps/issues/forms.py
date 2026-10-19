@@ -63,6 +63,7 @@ class CitizenIssueForm(forms.ModelForm):
 
     def __init__(self, *args, municipality=None, **kwargs):
         super().__init__(*args, **kwargs)
+        self.municipality = municipality
         apply_bootstrap_widgets(self)
         if municipality:
             self.fields["settlement"].queryset = municipality.settlements.filter(is_active=True)
@@ -75,6 +76,18 @@ class CitizenIssueForm(forms.ModelForm):
         if value:
             raise forms.ValidationError("Spam protection triggered.")
         return value
+
+    def clean(self):
+        cleaned_data = super().clean()
+        if (
+            (not self.municipality or not self.municipality.photo_uploads_enabled)
+            and (self.files or self.data.get("photos"))
+        ):
+            raise forms.ValidationError(
+                "Прикачувањето фотографии не е достапно за оваа општина. Испрати ја пријавата само со текст.",
+                code="photos_disabled",
+            )
+        return cleaned_data
 
     def clean_send_receipt(self):
         requested = self.cleaned_data.get("send_receipt", False)

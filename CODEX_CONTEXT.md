@@ -1,11 +1,19 @@
 # Codex Context — Opštinski Inbox + Sredi
 
-Last updated: 2026-07-14
+Last updated: 2026-10-19
 Project path: `/Users/vaselazarev/Desktop/work/cs/opstinski-inbox`
 
 ## Git workflow continuity
 
 Read [docs/GIT_WORKFLOW.md](docs/GIT_WORKFLOW.md) before Git work. It records the owner's agreed branch and commit conventions, standing authorization for routine commits and pushes, and the repository setup checkpoint from 2026-10-19. Inspect live Git state before relying on that checkpoint.
+
+## Current pilot scope (2026-10-19)
+
+- The pilot is text-only. `Municipality.photo_uploads_enabled` defaults to `False`; migration `0005` applies this to existing municipalities too. UI controls are conditional and both submission endpoints enforce the switch.
+- Preserve attachment models, processing, private downloads, and existing media for later opt-in use. Photos can be enabled per municipality in Django admin after operational and policy preparation.
+- Production code includes Redis/Celery for shared state and background work. Earlier MVP notes below that say no Redis or always include citizen photos are historical and superseded by the current implementation.
+- The pre-change checkpoint is on GitHub PR #1, merged into `develop` as `1004157`; `main` remains at the original baseline. Production rollout is still pending.
+- See `docs/PILOT_OPERATIONS.md` and `docs/GIT_WORKFLOW.md` before deployment or Git work.
 
 ## Product context
 

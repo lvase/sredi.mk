@@ -78,11 +78,13 @@
             {{ form.description }}
             {{ form.description.errors }}
           </div>
+          {% if municipality.photo_uploads_enabled %}
           <div>
             <label class="form-label" for="id_photos">Фотографии</label>
             <input class="form-control" id="id_photos" name="photos" type="file" accept="image/jpeg,image/png,image/webp" multiple>
             <div class="form-text">Незадолжително, максимум 5 фотографии. Дозволени се JPG, PNG и WEBP.</div>
           </div>
+          {% endif %}
         </div>
       </section>
 

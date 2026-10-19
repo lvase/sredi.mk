@@ -15,12 +15,14 @@ flowchart TB
         MunicipalLanding --> OpenForm[Open /municipality-slug/prijavi]
         OpenForm --> FormOptions[GET form-options<br/>Active settlements + local/global categories]
         FormOptions --> EnterReport[Enter settlement, category, title,<br/>description, location and optional contact data]
-        EnterReport --> AttachPhotos[Optionally attach up to 5 photos<br/>JPG / PNG / WEBP]
-        AttachPhotos --> Consent[Accept processing consent<br/>Optional email receipt]
-        Consent --> Submit[POST multipart issue submission]
+        EnterReport --> PhotosEnabled{Municipality photo uploads enabled?<br/>Default: no}
+        PhotosEnabled -->|No: pilot| Consent[Accept processing consent<br/>Optional email receipt]
+        PhotosEnabled -->|Yes: later opt-in| AttachPhotos[Optionally attach up to 5 photos<br/>JPG / PNG / WEBP]
+        AttachPhotos --> Consent
+        Consent --> Submit[POST JSON for text-only pilot<br/>multipart for enabled uploads]
         Submit --> MunicipalityCheck{Municipality slug exists<br/>and is active?}
         MunicipalityCheck -->|No| Public404
-        MunicipalityCheck -->|Yes| FormValidation{Form valid?<br/>Consent, honeypot, scoped options,<br/>receipt requires email}
+        MunicipalityCheck -->|Yes| FormValidation{Form valid?<br/>Consent, honeypot, scoped options,<br/>receipt requires email,<br/>reject files when uploads disabled}
         FormValidation -->|No| ValidationError[400 field errors]
         ValidationError --> EnterReport
         FormValidation -->|Yes| HashClient[Resolve trusted client IP<br/>Store SHA-256 IP and user-agent hashes]
@@ -32,7 +34,7 @@ flowchart TB
         UploadError --> AttachPhotos
         PhotoValidation -->|Yes| AssessRisk[Calculate suspicious score<br/>frequency + daily volume + repeated text/location + photo count]
         AssessRisk --> SaveIssue[Atomic DB write:<br/>Issue in pending_triage + unique tracking code]
-        SaveIssue --> SaveAttachments[Normalize to bounded WebP<br/>then create attachment rows and private files]
+        SaveIssue --> SaveAttachments[Only when photos supplied:<br/>store normalized WebP attachments]
         SaveAttachments --> ReceiptRequested{Email receipt requested?}
         ReceiptRequested -->|No| ReceiptSkipped[receipt_delivery = not_requested]
         ReceiptRequested -->|Yes| SendReceipt[Create delivery record after commit<br/>queue Celery email task]

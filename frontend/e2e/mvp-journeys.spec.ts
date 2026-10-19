@@ -20,23 +20,41 @@ async function fillReport(page: Page, prefix: string) {
   await page.locator('input[name="consent"]').check();
 }
 
-test("citizen can preview a photo, submit, and open tracking", async ({ page }) => {
+test("citizen can submit a text-only report and open tracking", async ({ page }) => {
   await page.goto("/konce/prijavi");
   await expect(page.getByText(/Намерно лажни, измамнички или манипулирани пријави/)).toBeVisible();
   await fillReport(page, "E2E јавна");
-  await page.locator('input[name="photos"]').setInputFiles({
-    name: "problem.png",
-    mimeType: "image/png",
-    buffer: ONE_PIXEL_PNG
-  });
-  await expect(page.getByAltText("problem.png")).toBeVisible();
+  await expect(page.locator('input[type="file"]')).toHaveCount(0);
+  await expect(page.getByText("Додај фотографии")).toHaveCount(0);
   await expect(page.getByRole("alert", { name: "Провери ги означените полиња" })).toHaveCount(0);
+  const submitted = page.waitForRequest((request) => request.method() === "POST" && request.url().endsWith("/api/municipalities/konce/issues/"));
   await page.getByRole("button", { name: "Испрати пријава" }).click();
+  const request = await submitted;
+  expect(request.headers()["content-type"]).toContain("application/json");
+  expect(request.postDataJSON()).not.toHaveProperty("photos");
   await expect(page.getByRole("heading", { name: "Пријавата е примена" })).toBeVisible();
   const code = await page.locator(".font-mono").innerText();
   expect(code.length).toBeGreaterThan(5);
   await page.getByRole("link", { name: "Провери статус" }).click();
   await expect(page).toHaveURL(new RegExp(`/konce/sledi\\?code=${code}`));
+});
+
+test("pilot rejects photo uploads sent directly to the API", async ({ page }) => {
+  await page.goto("/konce/prijavi");
+  const csrf = await page.request.get("/api/auth/csrf/");
+  const token = (await csrf.json()).data.csrfToken;
+  const options = (await (await page.request.get("/api/municipalities/konce/form-options/")).json()).data;
+  expect(options.municipality.photo_uploads_enabled).toBe(false);
+  const response = await page.request.post("/api/municipalities/konce/issues/", {
+    headers: { "X-CSRFToken": token },
+    multipart: {
+      settlement: String(options.settlements[0].id), category: String(options.categories[0].id),
+      title: "Direct upload", description: "Should be rejected", location_text: "Centre", consent: "on",
+      photos: { name: "problem.png", mimeType: "image/png", buffer: ONE_PIXEL_PNG }
+    }
+  });
+  expect(response.status()).toBe(400);
+  expect((await response.json()).errors.__all__[0]).toContain("Прикачувањето фотографии не е достапно");
 });
 
 test("staff feedback and municipality isolation survive an account switch", async ({ page }) => {
