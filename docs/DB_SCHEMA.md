@@ -13,6 +13,8 @@ This document is the detailed database design for **Opštinski Inbox / Sredi**. 
 - Make privacy retention enforceable per municipality.
 - Keep report writes transactional while using Redis for shared caches/throttles and Celery for email, retention, cleanup, and monitoring.
 
+`Municipality.photo_uploads_enabled` defaults to `False` for the text-only pilot. It controls new citizen uploads; existing attachment rows, private files, and municipal crests remain intact.
+
 ## 2. Conventions
 
 | Convention | Design |
@@ -49,6 +51,7 @@ erDiagram
         varchar name UK
         varchar slug UK
         boolean is_active
+        boolean photo_uploads_enabled
         varchar public_accent_color
         varchar official_coat_of_arms
         varchar configuration_status

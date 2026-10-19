@@ -68,7 +68,7 @@ def public_dashboard(request, municipality_slug):
 def submit_issue(request, municipality_slug):
     municipality = get_municipality_or_404(municipality_slug)
     if request.method == "POST":
-        form = CitizenIssueForm(request.POST, municipality=municipality)
+        form = CitizenIssueForm(request.POST, request.FILES, municipality=municipality)
         files = request.FILES.getlist("photos")
         form_is_valid = form.is_valid()
         if form_is_valid:

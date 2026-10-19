@@ -44,7 +44,7 @@ export function MunicipalityPage() {
 
     <section className="grid gap-10 lg:grid-cols-[1fr_320px]">
       <div><p className="eyebrow">Како работи</p><h2 className="mt-2 text-3xl font-semibold">Од пријава до исход</h2><ol className="mt-7 divide-y border-y">{[
-        ["01", "Опиши го проблемот", "Одбери место и категорија, внеси краток опис и по желба додај фотографии."],
+        ["01", "Опиши го проблемот", "Одбери место и категорија, внеси локација и краток опис на проблемот."],
         ["02", "Општината го презема случајот", "Службениците ја проверуваат пријавата и ја упатуваат до надлежниот тим."],
         ["03", "Следи го постапувањето", "Со приватниот код го гледаш тековниот статус и јавните ажурирања."]
       ].map(([number, title, text]) => <li key={number} className="grid gap-3 py-6 sm:grid-cols-[56px_1fr]"><span className="font-mono text-sm font-bold text-primary">{number}</span><div><h3 className="text-lg font-bold">{title}</h3><p className="mt-1 max-w-2xl text-muted-foreground">{text}</p></div></li>)}</ol></div>

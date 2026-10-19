@@ -186,7 +186,7 @@ def test_client_ip_uses_rightmost_untrusted_address_behind_trusted_proxies():
 
 @pytest.mark.django_db
 def test_public_submission_rejects_invalid_upload_type(client):
-    municipality = Municipality.objects.create(name="Општина Конче", slug="konce")
+    municipality = Municipality.objects.create(name="Општина Конче", slug="konce", photo_uploads_enabled=True)
     settlement = Settlement.objects.create(municipality=municipality, name="Конче")
     category = IssueCategory.objects.create(municipality=municipality, name="Друго")
     upload = SimpleUploadedFile("note.txt", b"not an image", content_type="text/plain")
@@ -215,7 +215,7 @@ def test_public_submission_rejects_invalid_upload_type(client):
 
 @pytest.mark.django_db
 def test_public_submission_rejects_corrupt_image_file(client):
-    municipality = Municipality.objects.create(name="Општина Конче", slug="konce")
+    municipality = Municipality.objects.create(name="Општина Конче", slug="konce", photo_uploads_enabled=True)
     settlement = Settlement.objects.create(municipality=municipality, name="Конче")
     category = IssueCategory.objects.create(municipality=municipality, name="Друго")
     upload = SimpleUploadedFile("photo.jpg", b"not a real image", content_type="image/jpeg")
@@ -311,13 +311,13 @@ def test_legal_pages_render(client):
     assert privacy_api_response.status_code == 200
     assert privacy_api_response.json()["data"] == {
         "title": "Политика за приватност",
-        "updated_at": "13.07.2026",
+        "updated_at": "19.10.2026",
         "notice": "Овој текст е работна верзија и треба да биде проверен од правник и од секоја општина пред јавно пуштање во употреба.",
         "platform_operator_name": settings.PLATFORM_OPERATOR_NAME,
         "privacy_contact_email": settings.PRIVACY_CONTACT_EMAIL,
     }
     assert terms_api_response.status_code == 200
-    assert terms_api_response.json()["data"]["updated_at"] == "14.07.2026"
+    assert terms_api_response.json()["data"]["updated_at"] == "19.10.2026"
     assert terms_api_response.json()["data"]["platform_operator_name"] == settings.PLATFORM_OPERATOR_NAME
 
 

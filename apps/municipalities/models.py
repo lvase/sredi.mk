@@ -27,6 +27,11 @@ class Municipality(models.Model):
     name = models.CharField(max_length=160, unique=True)
     slug = models.SlugField(max_length=180, unique=True)
     is_active = models.BooleanField(default=True)
+    photo_uploads_enabled = models.BooleanField(
+        default=False,
+        verbose_name="Овозможи фотографии во пријави",
+        help_text="Исклучено за пилотот. Постоечките прилози се зачувуваат.",
+    )
     public_accent_color = models.CharField(
         max_length=7,
         blank=True,

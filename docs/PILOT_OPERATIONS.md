@@ -2,6 +2,16 @@
 
 This runbook covers the single-Ubuntu-VPS pilot stack in `docker-compose.prod.yml`. Development Compose remains separate and unchanged.
 
+## Text-only pilot
+
+Migration `municipalities.0005_municipality_photo_uploads_enabled` adds a per-municipality switch with `False` as the default for existing and new municipalities. Keep it off for every pilot municipality. Verify the `photo_uploads_enabled` value returned by `/api/municipalities/<slug>/form-options/` before onboarding.
+
+The React and legacy Django forms hide photo uploads when the switch is off. Both submission paths reject uploaded files before image processing or report creation; text-only React submissions use JSON. Existing attachments, private download permissions, retention rules, and backups are preserved. Municipal crests are not citizen photo uploads and remain supported.
+
+For a later photo-enabled offering, explicitly enable the municipality's **Овозможи фотографии во пријави** setting in Django admin only after updating the public policy/copy, agreeing the service scope, and validating storage, backup, and image-processing capacity. Existing image-processing tests cover the enabled path. Do not delete attachment tables, historical migrations, or stored files to turn off uploads.
+
+The image benchmarking and upload-burst instructions below apply only when preparing that later offering. The k6 profile submits text by default; `UPLOAD_PHOTOS=1` opts into image uploads on a disposable staging municipality with the switch enabled. Redis and Celery still support shared throttles, caches, email delivery, and existing-data maintenance; removing photos does not remove these responsibilities.
+
 ## First deployment
 
 1. Copy `.env.production.example` to `.env.production`, replace every placeholder, and keep that file off Git.
@@ -86,7 +96,7 @@ Before rollout, benchmark five representative high-resolution images on the targ
 
 ## Scalability profile
 
-Use a disposable database to seed either target dataset, then run the checked-in k6 profile with 20 concurrent public visitors, a five-request upload burst, and (when a session cookie is supplied) the staff inbox:
+Use a disposable database to seed either target dataset, then run the checked-in k6 profile with 20 concurrent public visitors, a five-request submission burst, and (when a session cookie is supplied) the staff inbox:
 
 ```bash
 python manage.py seed_load_profile --municipality konce --reports 5200 --confirm SEED-konce-5200
@@ -94,4 +104,4 @@ k6 run -e BASE_URL=https://staging.example.mk -e MUNICIPALITY_SLUG=konce \
   -e SETTLEMENT_ID=1 -e CATEGORY_ID=1 -e TRACKING_CODE=<code> load/k6.js
 ```
 
-Repeat with `--reports 78000 --confirm SEED-konce-78000`. Raise only the staging submission throttle for the controlled upload scenario. Record host memory, image-process RSS, queue depth, filesystem use, orphan-file checks, worker restarts, and k6 p95 results; do not reuse the generated reports in production.
+Repeat with `--reports 78000 --confirm SEED-konce-78000`. Raise only the staging submission throttle for the controlled submission scenario. Record host memory, image-process RSS, queue depth, filesystem use, orphan-file checks, worker restarts, and k6 p95 results; do not reuse the generated reports in production.

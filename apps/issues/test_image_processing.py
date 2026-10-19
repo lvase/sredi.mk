@@ -52,7 +52,7 @@ def animated_webp_upload():
 
 @pytest.fixture
 def issue_form_data():
-    municipality = Municipality.objects.create(name="Општина Конче", slug="image-konce")
+    municipality = Municipality.objects.create(name="Општина Конче", slug="image-konce", photo_uploads_enabled=True)
     settlement = Settlement.objects.create(municipality=municipality, name="Конче")
     category = IssueCategory.objects.create(municipality=municipality, name="Комунално")
     return municipality, {

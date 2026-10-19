@@ -193,12 +193,12 @@ def legal_payload(kind):
         return {
             **shared,
             "title": "Политика за приватност",
-            "updated_at": "13.07.2026",
+            "updated_at": "19.10.2026",
         }
     return {
         **shared,
         "title": "Услови за користење",
-        "updated_at": "14.07.2026",
+        "updated_at": "19.10.2026",
     }
 
 
@@ -716,7 +716,7 @@ def form_options(request, municipality_slug):
 @require_shared_throttle
 def submit_issue(request, municipality_slug):
     municipality = get_municipality_or_404(municipality_slug)
-    form = CitizenIssueForm(request.data, municipality=municipality)
+    form = CitizenIssueForm(request.data, request.FILES, municipality=municipality)
     files = request.FILES.getlist("photos")
     form_is_valid = form.is_valid()
     if not form_is_valid:
