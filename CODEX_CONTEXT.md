@@ -3,6 +3,10 @@
 Last updated: 2026-07-14
 Project path: `/Users/vaselazarev/Desktop/work/cs/opstinski-inbox`
 
+## Git workflow continuity
+
+Read [docs/GIT_WORKFLOW.md](docs/GIT_WORKFLOW.md) before Git work. It records the owner's agreed branch and commit conventions, standing authorization for routine commits and pushes, and the repository setup checkpoint from 2026-10-19. Inspect live Git state before relying on that checkpoint.
+
 ## Product context
 
 This is a municipal issue-reporting MVP for North Macedonia.
@@ -78,7 +82,7 @@ Implemented data model includes:
 - IssueStatusEvent
 - IssueComment
 - IssueDuplicateLink
-- SlaPolicy
+- ResponseTarget
 - AuditLog
 
 Anonymous reporting:
@@ -150,7 +154,7 @@ Staff workflow:
 - Sensitive statuses require a staff note: resolved, duplicate, spam/rejected, and not-in-jurisdiction.
 - Status changes to accepted/assigned apply the category default department when the issue has no department.
 - Superusers can create staff users from `/staff/users/new/` without opening Django admin.
-- Overdue calculations now use `SlaPolicy` category-specific or municipality-default hours.
+- Each municipality has one `ResponseTarget` with review and resolution hours; overdue calculations use those targets with 24/240-hour fallbacks.
 
 ## Important implementation notes
 

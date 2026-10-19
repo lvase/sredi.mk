@@ -6,7 +6,7 @@ import pytest
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import close_old_connections
+from django.db import close_old_connections, connections
 from django.test import RequestFactory, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -14,6 +14,7 @@ from django.utils import timezone
 from apps.accounts.models import StaffProfile, StaffRole
 from apps.issues.admin import anonymize_citizen_contact, export_issues_csv
 from apps.issues.models import (
+    AttachmentDeletionState,
     AuditLog,
     DataRetentionPolicy,
     Issue,
@@ -21,7 +22,7 @@ from apps.issues.models import (
     IssueCategory,
     IssueComment,
     IssueStatus,
-    SlaPolicy,
+    ResponseTarget,
     SubmissionRateLimit,
 )
 from apps.issues.retention import apply_retention, preview_retention
@@ -153,7 +154,7 @@ def test_rate_limit_consumption_is_atomic_under_concurrent_requests():
             thread_municipality = Municipality.objects.get(pk=municipality_id)
             return consume_submission_rate_limit(thread_municipality, "concurrent-ip-hash")[0]
         finally:
-            close_old_connections()
+            connections.close_all()
 
     with ThreadPoolExecutor(max_workers=6) as executor:
         results = list(executor.map(consume_slot, range(6)))
@@ -885,12 +886,12 @@ def test_staff_update_and_comment_create_audit_logs(client):
 
 
 @pytest.mark.django_db
-def test_staff_dashboard_uses_sla_policy_for_overdue_filter(client):
+def test_staff_dashboard_uses_response_target_for_overdue_filter(client):
     user_model = get_user_model()
     municipality = Municipality.objects.create(name="Општина Конче", slug="konce")
     settlement = Settlement.objects.create(municipality=municipality, name="Конче")
     category = IssueCategory.objects.create(municipality=municipality, name="Комунално")
-    SlaPolicy.objects.create(municipality=municipality, category=category, triage_hours=1)
+    ResponseTarget.objects.create(municipality=municipality, review_hours=1)
     issue = Issue.objects.create(
         municipality=municipality,
         settlement=settlement,
@@ -1482,7 +1483,10 @@ def test_retention_preview_apply_and_repeat_are_audited(client, tmp_path):
         assert issue.contact_anonymized_at == now
         assert issue.attachments_deleted_at == now
         assert not attachment_path.exists()
-        assert not IssueAttachment.objects.filter(pk=attachment.pk).exists()
+        attachment.refresh_from_db()
+        assert attachment.deletion_state == AttachmentDeletionState.DELETED
+        assert attachment.deleted_at == now
+        assert not attachment.image.storage.exists(attachment.image.name)
         assert not SubmissionRateLimit.objects.filter(pk=limit.pk).exists()
         assert AuditLog.objects.filter(action="data_retention_applied", actor=superuser).exists()
 
@@ -1500,6 +1504,11 @@ def test_declarative_municipality_configuration_stays_unverified_until_superuser
     assert municipality.configuration_status == ConfigurationStatus.UNVERIFIED
     assert municipality.settlements.filter(is_active=True).count() == len(data["settlements"])
     assert municipality.departments.filter(is_active=True).count() == len(data["departments"])
+    assert municipality.response_target.review_hours == data["response_targets"]["review_hours"]
+    assert (
+        municipality.response_target.resolution_hours
+        == data["response_targets"]["resolution_hours"]
+    )
     assert validate_municipality_configuration(municipality) == []
 
     superuser = get_user_model().objects.create_superuser(

@@ -1,3 +1,18 @@
+log_format sredi_json escape=json '{"time":"$time_iso8601","remote_addr":"$remote_addr",'
+    '"request_id":"$request_id","method":"$request_method","uri":"$uri",'
+    '"status":$status,"bytes":$body_bytes_sent,"request_time":$request_time}';
+access_log /dev/stdout sredi_json;
+error_log /dev/stderr warn;
+
+limit_req_zone $binary_remote_addr zone=submission_per_ip:10m rate=10r/m;
+limit_req_zone $binary_remote_addr zone=login_per_ip:10m rate=10r/m;
+limit_req_zone $binary_remote_addr zone=tracking_per_ip:10m rate=30r/m;
+limit_req_zone $binary_remote_addr zone=public_api_per_ip:10m rate=60r/m;
+limit_conn_zone $binary_remote_addr zone=connections_per_ip:10m;
+limit_req_status 429;
+limit_conn_status 429;
+limit_req_log_level warn;
+
 server {
     listen 80;
     server_name ${DOMAIN};
@@ -23,7 +38,9 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
 
-    client_max_body_size 28m;
+    client_max_body_size 1m;
+    limit_conn connections_per_ip 20;
+    error_page 429 = @rate_limited;
     add_header Strict-Transport-Security "max-age=${HSTS_MAX_AGE}" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-Frame-Options "DENY" always;
@@ -31,7 +48,73 @@ server {
     add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
     add_header Content-Security-Policy "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
 
+    location ~ ^/api/municipalities/[^/]+/issues/$ {
+        limit_req zone=submission_per_ip burst=2 nodelay;
+        client_max_body_size 28m;
+        client_body_timeout 30s;
+        proxy_read_timeout 75s;
+        proxy_pass http://app:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Request-ID $request_id;
+    }
+
+    location = /api/auth/login/ {
+        limit_req zone=login_per_ip burst=2 nodelay;
+        proxy_pass http://app:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Request-ID $request_id;
+    }
+
+    location ~ ^/api/auth/(2fa|security/totp)/ {
+        limit_req zone=login_per_ip burst=2 nodelay;
+        proxy_pass http://app:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Request-ID $request_id;
+    }
+
+    location ~ ^/api/municipalities/[^/]+/track/$ {
+        limit_req zone=tracking_per_ip burst=5 nodelay;
+        proxy_pass http://app:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Request-ID $request_id;
+    }
+
+    location ~ ^/api/municipalities/[^/]+/(statistics|statistics\.csv)/$ {
+        limit_req zone=public_api_per_ip burst=10 nodelay;
+        proxy_pass http://app:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Request-ID $request_id;
+    }
+
+    location /api/staff/ {
+        proxy_pass http://app:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Request-ID $request_id;
+    }
+
     location /api/ {
+        limit_req zone=public_api_per_ip burst=10 nodelay;
+        proxy_pass http://app:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Request-ID $request_id;
+    }
+
+    location = /admin/login/ {
+        limit_req zone=login_per_ip burst=2 nodelay;
         proxy_pass http://app:8000;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto https;
@@ -66,5 +149,11 @@ server {
     location / {
         root /usr/share/nginx/html;
         try_files $uri $uri/ /index.html;
+    }
+
+    location @rate_limited {
+        default_type application/json;
+        add_header Retry-After 60 always;
+        return 429 '{"errors":{"rate_limit":["Премногу барања. Обиди се повторно подоцна."]}}';
     }
 }

@@ -5,7 +5,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.accounts.models import StaffProfile
-from apps.issues.models import AuditLog, IssueCategory, SlaPolicy
+from apps.issues.models import AuditLog, IssueCategory, ResponseTarget
 from apps.municipalities.models import (
     ConfigurationStatus,
     Department,
@@ -20,7 +20,14 @@ def load_configuration(path):
 
 def validate_configuration_payload(data):
     errors = []
-    for key in ["name", "slug", "settlements", "departments", "categories", "sla"]:
+    for key in [
+        "name",
+        "slug",
+        "settlements",
+        "departments",
+        "categories",
+        "response_targets",
+    ]:
         if key not in data:
             errors.append(f"Недостасува поле: {key}.")
     if errors:
@@ -39,9 +46,14 @@ def validate_configuration_payload(data):
             errors.append(
                 f"Категоријата {category.get('name', '-')} упатува на непостоечко одделение."
             )
-    for field in ["triage_hours", "first_response_hours", "resolution_hours"]:
-        if not isinstance(data["sla"].get(field), int) or data["sla"].get(field, 0) <= 0:
-            errors.append(f"SLA полето {field} мора да биде позитивен цел број.")
+    for field in ["review_hours", "resolution_hours"]:
+        if (
+            not isinstance(data["response_targets"].get(field), int)
+            or data["response_targets"].get(field, 0) <= 0
+        ):
+            errors.append(
+                f"Полето за рок на одговор {field} мора да биде позитивен цел број."
+            )
     return errors
 
 
@@ -68,6 +80,11 @@ def apply_configuration(data, source_reference, actor=None, verify=False):
         municipality.configuration_verified_at = None
         municipality.configuration_verified_by = None
     municipality.save()
+
+    ResponseTarget.objects.update_or_create(
+        municipality=municipality,
+        defaults=data["response_targets"],
+    )
 
     settlement_names = {name.strip() for name in data["settlements"] if name.strip()}
     for name in settlement_names:
@@ -104,11 +121,6 @@ def apply_configuration(data, source_reference, actor=None, verify=False):
                 "is_active": True,
             },
         )
-        SlaPolicy.objects.update_or_create(
-            municipality=municipality,
-            category=category,
-            defaults=data["sla"],
-        )
     IssueCategory.objects.filter(municipality=municipality).exclude(name__in=category_names).update(
         is_active=False
     )
@@ -144,8 +156,8 @@ def validate_municipality_configuration(municipality):
             errors.append(f"Категоријата {category.name} нема основно одделение.")
         elif category.default_department.municipality_id != municipality.id:
             errors.append(f"Категоријата {category.name} упатува на друга општина.")
-        if SlaPolicy.objects.filter(municipality=municipality, category=category).count() != 1:
-            errors.append(f"Категоријата {category.name} мора да има точно една SLA политика.")
+    if not ResponseTarget.objects.filter(municipality=municipality).exists():
+        errors.append("Општината нема поставени рокови за одговор.")
     profiles = StaffProfile.objects.filter(municipality=municipality).select_related(
         "department"
     )

@@ -6,6 +6,7 @@ from rest_framework import serializers
 from apps.accounts.models import StaffProfile, StaffRole
 from apps.accounts.security import confirmed_totp_device
 from apps.issues.models import (
+    AttachmentDeletionState,
     AuditLog,
     Issue,
     IssueCategory,
@@ -55,6 +56,9 @@ class MunicipalitySerializer(serializers.ModelSerializer):
         ]
 
     def get_active_report_count(self, municipality):
+        annotated = getattr(municipality, "active_report_count_value", None)
+        if annotated is not None:
+            return annotated
         return municipality.issues.exclude(
             status__in=[
                 IssueStatus.RESOLVED,
@@ -66,6 +70,10 @@ class MunicipalitySerializer(serializers.ModelSerializer):
         ).count()
 
     def get_latest_public_notice(self, municipality):
+        prefetched = getattr(municipality, "published_public_notices", None)
+        if prefetched is not None:
+            notice = prefetched[0] if prefetched else None
+            return MunicipalityPublicNoticeSerializer(notice).data if notice else None
         notice = municipality.public_notices.filter(
             publication_state=NoticePublicationState.PUBLISHED,
             published_at__isnull=False,
@@ -87,8 +95,14 @@ class SettlementSerializer(serializers.ModelSerializer):
         fields = ["id", "name"]
 
 
+class MunicipalityReferenceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Municipality
+        fields = ["id", "name", "slug", "configuration_status"]
+
+
 class DepartmentSerializer(serializers.ModelSerializer):
-    municipality = MunicipalitySerializer(read_only=True)
+    municipality = MunicipalityReferenceSerializer(read_only=True)
 
     class Meta:
         model = Department
@@ -103,7 +117,7 @@ class IssueCategorySerializer(serializers.ModelSerializer):
 
 class UserSummarySerializer(serializers.ModelSerializer):
     role = serializers.CharField(source="staffprofile.role", read_only=True)
-    municipality = MunicipalitySerializer(source="staffprofile.municipality", read_only=True)
+    municipality = MunicipalityReferenceSerializer(source="staffprofile.municipality", read_only=True)
     department = DepartmentSerializer(source="staffprofile.department", read_only=True)
     is_superuser = serializers.BooleanField(read_only=True)
     two_factor_enabled = serializers.SerializerMethodField()
@@ -124,6 +138,9 @@ class UserSummarySerializer(serializers.ModelSerializer):
         ]
 
     def get_two_factor_enabled(self, user):
+        annotated = getattr(user, "two_factor_enabled_annotation", None)
+        if annotated is not None:
+            return bool(annotated)
         return bool(confirmed_totp_device(user))
 
     def get_must_change_password(self, user):
@@ -188,21 +205,26 @@ class TrackedIssueSerializer(serializers.ModelSerializer):
         comments = getattr(issue, "public_comments", None)
         if comments is None:
             comments = issue.comments.filter(is_internal=False).select_related("author")
-        return PublicCommentSerializer(comments, many=True).data
+        return PublicCommentSerializer(sorted(comments, key=lambda item: item.created_at), many=True).data
 
     def get_status_label(self, issue):
         return public_status_label(issue.status)
 
     def get_public_updates(self, issue):
-        return PublicUpdateSerializer(build_public_updates(issue), many=True).data
+        return PublicUpdateSerializer(build_public_updates(issue)[-100:], many=True).data
 
 
 class IssueAttachmentSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     url = serializers.SerializerMethodField()
     uploaded_at = serializers.DateTimeField()
+    deletion_state = serializers.CharField()
+    deleted_at = serializers.DateTimeField(allow_null=True)
+    deletion_reason = serializers.CharField()
 
     def get_url(self, attachment):
+        if attachment.deletion_state != AttachmentDeletionState.ACTIVE:
+            return None
         return reverse("api_staff_attachment", args=[attachment.pk])
 
 
@@ -253,6 +275,7 @@ class StaffIssueListSerializer(serializers.ModelSerializer):
         model = Issue
         fields = [
             "id",
+            "version",
             "tracking_code",
             "title",
             "public_title",
@@ -289,13 +312,19 @@ class StaffIssueDetailSerializer(StaffIssueListSerializer):
     public_resolution_note = serializers.CharField()
     internal_note = serializers.CharField()
     attachments = IssueAttachmentSerializer(many=True)
-    comments = IssueCommentSerializer(many=True)
-    status_events = IssueStatusEventSerializer(many=True)
+    comments = serializers.SerializerMethodField()
+    status_events = serializers.SerializerMethodField()
     audit_logs = serializers.SerializerMethodField()
     permissions = serializers.DictField(read_only=True)
     public_title_approved_by = serializers.CharField(
         source="public_title_approved_by.get_username", allow_null=True
     )
+    comments_count = serializers.IntegerField(read_only=True)
+    status_events_count = serializers.IntegerField(read_only=True)
+    audit_logs_count = serializers.IntegerField(read_only=True)
+    comments_next_cursor = serializers.SerializerMethodField()
+    status_events_next_cursor = serializers.SerializerMethodField()
+    audit_logs_next_cursor = serializers.SerializerMethodField()
 
     class Meta(StaffIssueListSerializer.Meta):
         fields = StaffIssueListSerializer.Meta.fields + [
@@ -314,11 +343,40 @@ class StaffIssueDetailSerializer(StaffIssueListSerializer):
             "audit_logs",
             "permissions",
             "public_title_approved_by",
+            "comments_count",
+            "status_events_count",
+            "audit_logs_count",
+            "comments_next_cursor",
+            "status_events_next_cursor",
+            "audit_logs_next_cursor",
+            "legal_hold_active",
+            "legal_hold_reason",
+            "legal_hold_set_at",
         ]
 
+    def get_comments(self, issue):
+        comments = getattr(issue, "bounded_comments", [])
+        return IssueCommentSerializer(comments, many=True).data
+
+    def get_status_events(self, issue):
+        events = getattr(issue, "bounded_status_events", [])
+        return IssueStatusEventSerializer(events, many=True).data
+
     def get_audit_logs(self, issue):
-        logs = AuditLog.objects.filter(object_type="Issue", object_id=str(issue.pk))[:20]
+        logs = getattr(issue, "bounded_audit_logs", [])
         return AuditLogSerializer(logs, many=True).data
+
+    def get_comments_next_cursor(self, issue):
+        rows = getattr(issue, "bounded_comments", [])
+        return str(rows[-1].pk) if issue.comments_count > len(rows) and rows else None
+
+    def get_status_events_next_cursor(self, issue):
+        rows = getattr(issue, "bounded_status_events", [])
+        return str(rows[-1].pk) if issue.status_events_count > len(rows) and rows else None
+
+    def get_audit_logs_next_cursor(self, issue):
+        rows = getattr(issue, "bounded_audit_logs", [])
+        return str(rows[-1].pk) if issue.audit_logs_count > len(rows) and rows else None
 
 
 class StaffUserCreateSerializer(serializers.Serializer):

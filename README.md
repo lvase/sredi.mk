@@ -7,6 +7,8 @@ Initial pilot targets: Opština Konče and Opština Radoviš.
 
 ## Local development
 
+Follow the [Git development workflow](docs/GIT_WORKFLOW.md) for branches, commits, pull requests, and production releases.
+
 ```bash
 cp .env.example .env
 docker compose up --build web frontend

@@ -1,5 +1,5 @@
 import { lazy, Suspense } from "react";
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Route, Routes } from "react-router-dom";
 import { PublicLayout } from "../layouts/PublicLayout";
 import { StaffLayout } from "../layouts/StaffLayout";
 import { HomePage } from "../pages/HomePage";
@@ -8,6 +8,7 @@ import { ReportPage } from "../pages/ReportPage";
 import { TrackPage } from "../pages/TrackPage";
 import { LegalPage } from "../pages/LegalPage";
 import { LoginPage } from "../pages/LoginPage";
+import { NotFoundPage } from "../pages/NotFoundPage";
 import { LoadingState } from "../components/LoadingState";
 
 const StatisticsPage = lazy(() => import("../pages/StatisticsPage").then((module) => ({ default: module.StatisticsPage })));
@@ -28,6 +29,7 @@ export function App() {
         <Route path=":municipalitySlug/prijavi" element={<ReportPage />} />
         <Route path=":municipalitySlug/statistika" element={<StatisticsPage />} />
         <Route path=":municipalitySlug/sledi" element={<TrackPage />} />
+        <Route path="*" element={<NotFoundPage />} />
       </Route>
       <Route path="staff" element={<StaffLayout />}>
         <Route index element={<StaffDashboardPage />} />
@@ -35,7 +37,6 @@ export function App() {
         <Route path="users/new" element={<StaffUserCreatePage />} />
         <Route path="security" element={<SecurityPage />} />
       </Route>
-      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes></Suspense>
   );
 }

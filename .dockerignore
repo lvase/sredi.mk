@@ -8,3 +8,7 @@ media
 outputs
 .codex_tmp
 .env.production
+.env
+.env.*
+!.env.example
+!.env.production.example

@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile.prod
     env_file: ${ENV_FILE:-.env.production}
-    command: gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3 --threads 2 --timeout 45
+    command: gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --threads 1 --timeout 60 --max-requests 500 --max-requests-jitter 50
     expose:
       - "8000"
     volumes:
@@ -13,12 +13,22 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "--fail", "--header", "X-Forwarded-Proto: https", "http://localhost:8000/health/ready/"]
       interval: 30s
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    mem_limit: 1400m
+    logging: &rotated-logs
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
   migrate:
     build:
@@ -31,7 +41,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    profiles: ["tools"]
+    restart: "no"
 
   nginx:
     build:
@@ -51,6 +61,8 @@ services:
       app:
         condition: service_healthy
     restart: unless-stopped
+    mem_limit: 128m
+    logging: *rotated-logs
 
   certbot:
     image: certbot/certbot:v5.2.2
@@ -76,6 +88,9 @@ services:
 
   db:
     image: postgres:16-alpine
+    command: >-
+      postgres -c max_connections=40 -c shared_buffers=256MB -c work_mem=4MB
+      -c statement_timeout=15s -c lock_timeout=5s
     env_file: ${ENV_FILE:-.env.production}
     expose:
       - "5432"
@@ -87,6 +102,60 @@ services:
       timeout: 5s
       retries: 10
     restart: unless-stopped
+    mem_limit: 900m
+    logging: *rotated-logs
+
+  redis:
+    image: redis:7.4-alpine
+    command: redis-server --appendonly yes --maxmemory 192mb --maxmemory-policy noeviction
+    expose:
+      - "6379"
+    volumes:
+      - redis_data_prod:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    mem_limit: 192m
+    logging: *rotated-logs
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    env_file: ${ENV_FILE:-.env.production}
+    command: celery -A config worker --loglevel=INFO --concurrency=1 --max-tasks-per-child=100
+    volumes:
+      - media_data:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    mem_limit: 512m
+    logging: *rotated-logs
+
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    env_file: ${ENV_FILE:-.env.production}
+    command: celery -A config beat --loglevel=INFO --schedule=/tmp/celerybeat-schedule
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    mem_limit: 128m
+    logging: *rotated-logs
 
   backup:
     build:
@@ -95,6 +164,7 @@ services:
     env_file: ${ENV_FILE:-.env.production}
     volumes:
       - media_data:/data/media:ro
+      - restic_data:/data/restic
       - ./scripts:/scripts:ro
     entrypoint: /scripts/backup.sh
     depends_on:
@@ -108,6 +178,7 @@ services:
       dockerfile: deploy/backup/Dockerfile
     env_file: ${ENV_FILE:-.env.production}
     volumes:
+      - restic_data:/data/restic
       - ./scripts:/scripts:ro
     entrypoint: /scripts/verify_restore.sh
     depends_on:
@@ -121,6 +192,7 @@ services:
       dockerfile: deploy/backup/Dockerfile
     env_file: ${ENV_FILE:-.env.production}
     volumes:
+      - restic_data:/data/restic
       - ./scripts:/scripts:ro
       - restore_staging:/restore
     entrypoint: /scripts/restore.sh
@@ -131,6 +203,8 @@ services:
 
 volumes:
   postgres_data_prod:
+  redis_data_prod:
+  restic_data:
   media_data:
   static_data:
   certbot_webroot:

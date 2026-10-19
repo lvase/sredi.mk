@@ -1,13 +1,12 @@
 import { FormEvent, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Globe2, MessageSquare } from "lucide-react";
-import { api, apiErrorMessage, ensureCsrf } from "../../lib/api";
+import { ArrowLeft, MessageSquare } from "lucide-react";
+import { api, ApiError, apiErrorMessage, ensureCsrf } from "../../lib/api";
 import type { StaffChoices, StaffIssueDetail } from "../../lib/types";
 import { formatDate, priorityTone, statusTone } from "../../lib/utils";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
-import { Card, CardContent } from "../../components/ui/card";
 import { Label } from "../../components/ui/label";
 import { Select } from "../../components/ui/select";
 import { Textarea } from "../../components/ui/textarea";
@@ -23,6 +22,7 @@ export function StaffIssueDetailPage() {
   const [statusFeedback, setStatusFeedback] = useState<ActionFeedback | null>(null);
   const [commentFeedback, setCommentFeedback] = useState<ActionFeedback | null>(null);
   const [moderationFeedback, setModerationFeedback] = useState<ActionFeedback | null>(null);
+  const [legalHoldFeedback, setLegalHoldFeedback] = useState<ActionFeedback | null>(null);
   const issue = useQuery({
     queryKey: ["staff-issue", issueId],
     queryFn: () => api.get<StaffIssueDetail>(`/staff/issues/${issueId}/`)
@@ -34,32 +34,32 @@ export function StaffIssueDetailPage() {
   const updateIssue = useMutation({
     mutationFn: async (payload: Record<string, string>) => {
       await ensureCsrf();
-      return api.patch<StaffIssueDetail>(`/staff/issues/${issueId}/`, payload);
+      return api.patch<StaffIssueDetail>(`/staff/issues/${issueId}/`, { ...payload, expected_version: issue.data?.version });
     },
     onSuccess: (data) => {
       queryClient.setQueryData(["staff-issue", issueId], data);
       queryClient.invalidateQueries({ queryKey: ["staff-issues"] });
       setUpdateFeedback({ tone: "success", message: "Промените се зачувани." });
     },
-    onError: (error) => setUpdateFeedback({
-      tone: "error",
-      message: apiErrorMessage(error, "Промените не се зачувани. Обиди се повторно.")
-    })
+    onError: (error) => {
+      if (error instanceof ApiError && error.status === 409) queryClient.invalidateQueries({ queryKey: ["staff-issue", issueId] });
+      setUpdateFeedback({ tone: "error", message: staleAwareMessage(error, "Промените не се зачувани. Обиди се повторно.") });
+    }
   });
   const statusIssue = useMutation({
     mutationFn: async (payload: Record<string, string>) => {
       await ensureCsrf();
-      return api.post<StaffIssueDetail>(`/staff/issues/${issueId}/status/`, payload);
+      return api.post<StaffIssueDetail>(`/staff/issues/${issueId}/status/`, { ...payload, expected_version: issue.data?.version });
     },
     onSuccess: (data) => {
       queryClient.setQueryData(["staff-issue", issueId], data);
       queryClient.invalidateQueries({ queryKey: ["staff-issues"] });
       setStatusFeedback({ tone: "success", message: "Статусот е зачуван." });
     },
-    onError: (error) => setStatusFeedback({
-      tone: "error",
-      message: apiErrorMessage(error, "Статусот не е зачуван. Обиди се повторно.")
-    })
+    onError: (error) => {
+      if (error instanceof ApiError && error.status === 409) queryClient.invalidateQueries({ queryKey: ["staff-issue", issueId] });
+      setStatusFeedback({ tone: "error", message: staleAwareMessage(error, "Статусот не е зачуван. Обиди се повторно.") });
+    }
   });
   const commentIssue = useMutation({
     mutationFn: async (payload: Record<string, string | boolean>) => {
@@ -78,14 +78,35 @@ export function StaffIssueDetailPage() {
   const moderateTitle = useMutation({
     mutationFn: async ({ action, publicTitle }: { action: "approve" | "revoke"; publicTitle?: string }) => {
       await ensureCsrf();
-      return api.post<StaffIssueDetail>(`/staff/issues/${issueId}/public-title/${action}/`, publicTitle ? { public_title: publicTitle } : {});
+      return api.post<StaffIssueDetail>(`/staff/issues/${issueId}/public-title/${action}/`, { ...(publicTitle ? { public_title: publicTitle } : {}), expected_version: issue.data?.version });
     },
     onSuccess: (data) => {
       queryClient.setQueryData(["staff-issue", issueId], data);
       queryClient.invalidateQueries({ queryKey: ["statistics"] });
       setModerationFeedback({ tone: "success", message: data.public_title_approved_at ? "Јавниот наслов е одобрен." : "Јавниот наслов е повлечен." });
     },
-    onError: (error) => setModerationFeedback({ tone: "error", message: apiErrorMessage(error, "Јавниот наслов не е променет.") })
+    onError: (error) => {
+      if (error instanceof ApiError && error.status === 409) queryClient.invalidateQueries({ queryKey: ["staff-issue", issueId] });
+      setModerationFeedback({ tone: "error", message: staleAwareMessage(error, "Јавниот наслов не е променет.") });
+    }
+  });
+  const changeLegalHold = useMutation({
+    mutationFn: async ({ active, reason }: { active: boolean; reason: string }) => {
+      await ensureCsrf();
+      return api.post<StaffIssueDetail>(`/staff/issues/${issueId}/legal-hold/`, {
+        active,
+        reason,
+        expected_version: issue.data?.version
+      });
+    },
+    onSuccess: (data) => {
+      queryClient.setQueryData(["staff-issue", issueId], data);
+      setLegalHoldFeedback({ tone: "success", message: data.legal_hold_active ? "Правното задржување е вклучено." : "Правното задржување е ослободено." });
+    },
+    onError: (error) => {
+      if (error instanceof ApiError && error.status === 409) queryClient.invalidateQueries({ queryKey: ["staff-issue", issueId] });
+      setLegalHoldFeedback({ tone: "error", message: staleAwareMessage(error, "Правното задржување не е променето.") });
+    }
   });
 
   if (issue.isLoading || choices.isLoading) return <LoadingState />;
@@ -131,25 +152,25 @@ export function StaffIssueDetailPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-start">
+      <div className="flex flex-col justify-between gap-4 border-b pb-6 lg:flex-row lg:items-start">
         <div>
           <Link to="/staff" className="inline-flex items-center gap-1 text-sm text-muted-foreground">
             <ArrowLeft className="h-4 w-4" /> Назад кон работна табла
           </Link>
-          <p className="eyebrow mt-4">{issue.data.tracking_code}</p>
-          <h1 className="mt-2 text-4xl font-black">{issue.data.title}</h1>
+          <p className="mt-4 font-mono text-sm font-bold text-primary">{issue.data.tracking_code}</p>
+          <h1 className="mt-2 text-4xl font-semibold">{issue.data.title}</h1>
           <p className="mt-2 text-muted-foreground">{issue.data.municipality} · {issue.data.settlement} · {issue.data.category}</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Badge variant={statusTone(issue.data.status)}>{issue.data.status_label}</Badge>
           <Badge variant={priorityTone(issue.data.priority)}>{issue.data.priority_label}</Badge>
         </div>
       </div>
-      <section className="grid gap-6 xl:grid-cols-[1fr_380px]">
+      <section className="case-layout grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
         <div className="space-y-6">
           <Card>
             <CardContent className="p-6">
-              <div className="flex items-start gap-3"><Globe2 className="mt-0.5 h-6 w-6 text-primary" /><div><h2 className="text-xl font-black">Јавен наслов</h2><p className="mt-1 text-sm text-muted-foreground">Само одобрениот текст се појавува во јавната статистика. Приватниот наслов погоре останува за службена работа.</p></div></div>
+              <div><h2 className="text-xl font-semibold">Јавен наслов</h2><p className="mt-1 text-sm text-muted-foreground">Само одобрениот текст се појавува во јавната статистика. Приватниот наслов погоре останува за службена работа.</p></div>
               <div className="mt-4"><ActionNotice feedback={moderationFeedback} /></div>
               {issue.data.permissions.can_moderate_public_title ? <form className="mt-4 space-y-3" onSubmit={(event) => { event.preventDefault(); const value = String(new FormData(event.currentTarget).get("public_title") || ""); moderateTitle.mutate({ action: "approve", publicTitle: value }); }}>
                 <Field label="Текст за јавно објавување"><Textarea name="public_title" aria-label="Текст за јавно објавување" maxLength={180} required defaultValue={issue.data.public_title || issue.data.title} /></Field>
@@ -160,13 +181,13 @@ export function StaffIssueDetailPage() {
           </Card>
           <Card>
             <CardContent className="p-6">
-              <h2 className="mb-5 text-xl font-black">Тек на пријавата</h2>
+              <h2 className="mb-5 text-xl font-semibold">Тек на пријавата</h2>
               <StatusTimeline stages={staffTimeline(issue.data.status)} exception={staffException(issue.data.status)} />
             </CardContent>
           </Card>
           <Card>
             <CardContent className="p-6">
-              <h2 className="mb-4 text-xl font-black">Опис на пријавата</h2>
+              <h2 className="mb-4 text-xl font-semibold">Опис на пријавата</h2>
               <p className="whitespace-pre-line">{issue.data.description}</p>
               <div className="mt-5 grid gap-3 md:grid-cols-3">
                 <Info label="Локација" value={issue.data.location_text} />
@@ -175,7 +196,7 @@ export function StaffIssueDetailPage() {
               </div>
               {issue.data.suspicious_reasons.length ? (
                 <div className="mt-5 rounded-md border border-amber-200 bg-amber-50 p-4">
-                  <h3 className="font-black text-amber-900">Причини за означување</h3>
+                  <h3 className="font-semibold text-amber-900">Причини за означување</h3>
                   <ul className="mt-2 space-y-2 text-sm text-amber-900">
                     {issue.data.suspicious_reasons.map((reason) => (
                       <li key={reason.code} className="flex justify-between gap-4">
@@ -190,12 +211,18 @@ export function StaffIssueDetailPage() {
               )}
               {issue.data.attachments.length ? (
                 <div className="mt-6 border-t pt-5">
-                  <h3 className="mb-3 font-black">Фотографии</h3>
+                  <h3 className="mb-3 font-semibold">Фотографии</h3>
                   <div className="flex flex-wrap gap-3">
                     {issue.data.attachments.map((attachment) => (
-                      <a key={attachment.id} href={attachment.url}>
-                        <img src={attachment.url} alt="Фотографија" className="h-28 w-40 rounded-md border object-cover" />
-                      </a>
+                      attachment.url ? (
+                        <a key={attachment.id} href={attachment.url}>
+                          <img src={attachment.url} alt="Фотографија" className="h-28 w-40 rounded-md border object-cover" />
+                        </a>
+                      ) : (
+                        <div key={attachment.id} className="flex h-28 w-40 items-center justify-center rounded-md border bg-muted p-3 text-center text-xs text-muted-foreground">
+                          Фотографијата е отстранета согласно политиката за задржување.
+                        </div>
+                      )
                     ))}
                   </div>
                 </div>
@@ -205,10 +232,10 @@ export function StaffIssueDetailPage() {
           {issue.data.permissions.can_comment ? (
             <Card>
               <CardContent className="p-6">
-                <h2 className="mb-4 text-xl font-black">Коментари</h2>
+                <h2 className="mb-4 text-xl font-semibold">Коментари</h2>
                 <form onSubmit={submitComment} className="mb-6 space-y-3">
                   <ActionNotice feedback={commentFeedback} />
-                  <Textarea name="body" aria-label="Службен коментар" required placeholder="Додај службен коментар..." />
+                  <Textarea name="body" aria-label="Службен коментар" maxLength={5000} required placeholder="Додај службен коментар..." />
                   <div className="flex items-center justify-between">
                     <label className="flex items-center gap-2 text-sm"><input name="is_internal" type="checkbox" defaultChecked /> Само за службеници (интерен)</label>
                     <Button disabled={commentIssue.isPending}>
@@ -231,7 +258,7 @@ export function StaffIssueDetailPage() {
           ) : null}
           <Card>
             <CardContent className="p-6">
-              <h2 className="mb-4 text-xl font-black">Историја</h2>
+              <h2 className="mb-4 text-xl font-semibold">Историја</h2>
               <div className="space-y-4">
                 {issue.data.status_events.length ? issue.data.status_events.map((event) => (
                   <div key={event.id} className="border-l-4 border-primary pl-4">
@@ -244,20 +271,32 @@ export function StaffIssueDetailPage() {
             </CardContent>
           </Card>
         </div>
-        <aside className="space-y-6">
-          <Card><CardContent className="p-5"><h2 className="mb-3 font-black">Задолжување</h2><Info label="Одделение" value={issue.data.assigned_department || "Не е доделено"} /><Info label="Вработен" value={issue.data.assigned_to || "Не е доделен"} /></CardContent></Card>
-          <Card><CardContent className="p-5"><h2 className="mb-3 font-black">Контакт</h2>{issue.data.is_anonymous ? <p className="text-muted-foreground">Анонимна пријава.</p> : <><Info label="Име" value={issue.data.citizen_name || "-"} /><Info label="Е-пошта" value={issue.data.citizen_email || "-"} /><Info label="Телефон" value={issue.data.citizen_phone || "-"} /></>}</CardContent></Card>
+        <aside className="case-action-rail self-start xl:sticky xl:top-24">
+          <Card><CardContent className="p-5"><h2 className="mb-3 font-semibold">Задолжување</h2><Info label="Одделение" value={issue.data.assigned_department || "Не е доделено"} /><Info label="Вработен" value={issue.data.assigned_to || "Не е доделен"} /></CardContent></Card>
+          <Card><CardContent className="p-5"><h2 className="mb-3 font-semibold">Контакт</h2>{issue.data.is_anonymous ? <p className="text-muted-foreground">Анонимна пријава.</p> : <><Info label="Име" value={issue.data.citizen_name || "-"} /><Info label="Е-пошта" value={issue.data.citizen_email || "-"} /><Info label="Телефон" value={issue.data.citizen_phone || "-"} /></>}</CardContent></Card>
+          {issue.data.permissions.can_manage_legal_hold ? (
+            <Card><CardContent className="p-5">
+              <h2 className="mb-2 font-semibold">Правно задржување</h2>
+              <p className="mb-3 text-sm text-muted-foreground">Активното задржување го запира бришењето на фотографиите.</p>
+              <ActionNotice feedback={legalHoldFeedback} />
+              {issue.data.legal_hold_active ? (
+                <div className="space-y-3"><p className="text-sm">Причина: {issue.data.legal_hold_reason}</p><Button variant="outline" disabled={changeLegalHold.isPending} onClick={() => changeLegalHold.mutate({ active: false, reason: "" })}>Ослободи задржување</Button></div>
+              ) : (
+                <form className="space-y-3" onSubmit={(event) => { event.preventDefault(); changeLegalHold.mutate({ active: true, reason: String(new FormData(event.currentTarget).get("reason") || "") }); }}><Textarea name="reason" maxLength={2000} required placeholder="Задолжителна службена причина…" /><Button disabled={changeLegalHold.isPending}>Вклучи задржување</Button></form>
+              )}
+            </CardContent></Card>
+          ) : null}
           {issue.data.permissions.can_update ? (
             <Card>
               <CardContent className="p-5">
-                <h2 className="mb-4 font-black">Ажурирај</h2>
+                <h2 className="mb-4 font-semibold">Ажурирај</h2>
                 <form onSubmit={submitUpdate} className="space-y-3">
                   <ActionNotice feedback={updateFeedback} />
                   <Field label="Приоритет"><Select name="priority" aria-label="Приоритет" defaultValue={issue.data.priority}>{choices.data.priority_choices.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}</Select></Field>
                   <Field label="Одделение"><Select name="assigned_department" aria-label="Одделение" defaultValue={issue.data.assigned_department_id ? String(issue.data.assigned_department_id) : ""}><option value="">Не е доделено</option>{issueDepartments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}</Select></Field>
                   <Field label="Вработен"><Select name="assigned_to" aria-label="Вработен" defaultValue={issue.data.assigned_to_id ? String(issue.data.assigned_to_id) : ""}><option value="">Не е доделен</option>{issueAssignees.map((user) => <option key={user.id} value={user.id}>{user.username}</option>)}</Select></Field>
-                  <Field label="Интерна белешка"><Textarea name="internal_note" aria-label="Интерна белешка" defaultValue={issue.data.internal_note} /></Field>
-                  <Field label="Јавна белешка"><Textarea name="public_resolution_note" aria-label="Јавна белешка" defaultValue={issue.data.public_resolution_note} /></Field>
+                  <Field label="Интерна белешка"><Textarea name="internal_note" aria-label="Интерна белешка" maxLength={10000} defaultValue={issue.data.internal_note} /></Field>
+                  <Field label="Јавна белешка"><Textarea name="public_resolution_note" aria-label="Јавна белешка" maxLength={5000} defaultValue={issue.data.public_resolution_note} /></Field>
                   <Button disabled={updateIssue.isPending}>{updateIssue.isPending ? "Се зачувува..." : "Зачувај промени"}</Button>
                 </form>
               </CardContent>
@@ -266,11 +305,11 @@ export function StaffIssueDetailPage() {
           {issue.data.permissions.can_change_status ? (
             <Card>
               <CardContent className="p-5">
-                <h2 className="mb-4 font-black">Промени статус</h2>
+                <h2 className="mb-4 font-semibold">Промени статус</h2>
                 <form onSubmit={submitStatus} className="space-y-3">
                   <ActionNotice feedback={statusFeedback} />
                   <Field label="Нов статус"><Select name="status" aria-label="Нов статус" defaultValue={issue.data.status}>{choices.data.status_choices.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}</Select></Field>
-                  <Field label="Белешка"><Textarea name="note" aria-label="Белешка за статус" placeholder="Внеси кратка службена белешка..." /></Field>
+                  <Field label="Белешка"><Textarea name="note" aria-label="Белешка за статус" maxLength={2000} placeholder="Внеси кратка службена белешка..." /></Field>
                   <Button disabled={statusIssue.isPending}>{statusIssue.isPending ? "Се зачувува..." : "Зачувај статус"}</Button>
                 </form>
               </CardContent>
@@ -288,18 +327,27 @@ function staffTimeline(status: string): TimelineStage[] {
   return [["submitted", "Примена"], ["verified", "Проверена"], ["assigned", "Доделена"], ["in_progress", "Во тек"], ["resolved", "Решена"]].map(([key, label], stage) => ({ key, label, state: stage < current ? "complete" : stage === current ? "current" : "upcoming" }));
 }
 
+function staleAwareMessage(error: unknown, fallback: string) {
+  return error instanceof ApiError && error.status === 409
+    ? "Пријавата во меѓувреме ја изменил друг корисник. Вчитана е најновата верзија; провери и обиди се повторно."
+    : apiErrorMessage(error, fallback);
+}
+
 function staffException(status: string) {
   return ({ duplicate: "Дупликат", rejected_spam: "Одбиена / спам", not_jurisdiction: "Не е во надлежност" } as Record<string, string>)[status] || null;
 }
 
 function Info({ label, value, mask = false }: { label: string; value: string; mask?: boolean }) {
   return (
-    <div className="rounded-md bg-muted p-3" data-visual-mask={mask || undefined}>
+    <div className="border-l-2 border-slate-300 pl-3" data-visual-mask={mask || undefined}>
       <p className="text-xs text-muted-foreground">{label}</p>
       <p className="font-semibold">{value}</p>
     </div>
   );
 }
+
+function Card({ children }: { children: React.ReactNode }) { return <section className="case-section">{children}</section>; }
+function CardContent({ children, className = "" }: { children: React.ReactNode; className?: string }) { return <div className={`case-section__content ${className}`}>{children}</div>; }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (

@@ -11,8 +11,8 @@ from apps.issues.models import (
     IssueCategory,
     IssueComment,
     IssueDuplicateLink,
+    ResponseTarget,
     IssueStatusEvent,
-    SlaPolicy,
 )
 
 
@@ -100,6 +100,11 @@ admin.site.register(IssueAttachment)
 admin.site.register(IssueStatusEvent)
 admin.site.register(IssueComment)
 admin.site.register(IssueDuplicateLink)
-admin.site.register(SlaPolicy)
+@admin.register(ResponseTarget)
+class ResponseTargetAdmin(admin.ModelAdmin):
+    list_display = ["municipality", "review_hours", "resolution_hours"]
+    list_select_related = ["municipality"]
+
+
 admin.site.register(AuditLog)
 admin.site.register(DataRetentionPolicy)

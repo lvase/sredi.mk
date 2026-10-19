@@ -18,7 +18,7 @@ def issue_for(municipality, settlement, category, title="Приватен нас
     )
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_title_moderation_permissions_isolation_audit_and_revocation(client):
     municipality = Municipality.objects.create(name="Општина А", slug="a")
     other = Municipality.objects.create(name="Општина Б", slug="b")
@@ -41,7 +41,7 @@ def test_title_moderation_permissions_isolation_audit_and_revocation(client):
     client.force_login(coordinator)
     approved = client.post(
         f"/api/staff/issues/{issue.pk}/public-title/approve/",
-        {"public_title": "Безбеден јавен наслов"},
+        {"public_title": "Безбеден јавен наслов", "expected_version": issue.version},
     )
     assert approved.status_code == 200
     issue.refresh_from_db()
@@ -56,7 +56,10 @@ def test_title_moderation_permissions_isolation_audit_and_revocation(client):
     assert "Приватен опис" not in str(public)
     assert "Приватна локација" not in str(public)
 
-    revoked = client.post(f"/api/staff/issues/{issue.pk}/public-title/revoke/", {})
+    revoked = client.post(
+        f"/api/staff/issues/{issue.pk}/public-title/revoke/",
+        {"expected_version": issue.version},
+    )
     assert revoked.status_code == 200
     assert client.get(
         f"/api/municipalities/{municipality.slug}/statistics/?period=all"
@@ -101,7 +104,12 @@ def test_health_checks_and_public_crest_do_not_expose_private_media(client):
         ),
     )
     assert client.get("/health/live/").json() == {"status": "ok"}
-    assert client.get("/health/ready/").json() == {"status": "ready"}
+    readiness = client.get("/health/ready/").json()
+    assert readiness["status"] == "ready"
+    assert readiness["dependencies"]["database"] == "ok"
+    assert readiness["dependencies"]["migrations"] == "ok"
+    assert readiness["dependencies"]["redis"] == "ok"
+    assert "storage" in readiness["dependencies"]
     detail = client.get(f"/api/municipalities/{municipality.slug}/").json()["data"]
     assert detail["official_coat_of_arms_url"].endswith(
         f"/api/municipalities/{municipality.slug}/crest/"

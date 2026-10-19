@@ -6,7 +6,8 @@ from django.template.response import TemplateResponse
 from django.urls import path, reverse
 
 from apps.issues.models import DataRetentionPolicy
-from apps.issues.retention import apply_retention, preview_retention
+from apps.issues.retention import preview_retention
+from apps.issues.tasks import run_attachment_retention
 from apps.municipalities.configuration import (
     apply_configuration,
     validate_configuration_payload,
@@ -41,13 +42,20 @@ def apply_data_retention(modeladmin, request, queryset):
         )
         return None
     if request.POST.get("apply_retention") == "1":
-        summaries = apply_retention(queryset, request.user)
-        affected = sum(item["contact_count"] + item["attachment_issue_count"] for item in summaries)
-        modeladmin.message_user(
-            request,
-            f"Политиката е применета. Обработени пријави: {affected}.",
-            messages.SUCCESS,
-        )
+        try:
+            run_attachment_retention.delay(list(queryset.values_list("pk", flat=True)))
+        except Exception:
+            modeladmin.message_user(
+                request,
+                "Задачата не може да се стави во редица. Обиди се повторно.",
+                messages.ERROR,
+            )
+        else:
+            modeladmin.message_user(
+                request,
+                "Задачата за задржување е ставена во редица (до 100 прилози по пакет).",
+                messages.SUCCESS,
+            )
         return None
     return TemplateResponse(
         request,

@@ -1,16 +1,38 @@
+import hashlib
+import json
+import logging
 import mimetypes
 from csv import writer
 from datetime import timedelta
+from functools import wraps
 from pathlib import Path
 from statistics import median
 
 from django.conf import settings
 from django.contrib.auth import authenticate, get_user_model, login, logout
 from django.contrib.auth.password_validation import validate_password
+from django.core.cache import cache
 from django.core.exceptions import ValidationError
-from django.core.mail import send_mail
 from django.db import transaction
-from django.db.models import Count, Max, Prefetch, Q
+from django.db.models import (
+    Aggregate,
+    Avg,
+    Case,
+    Count,
+    Exists,
+    ExpressionWrapper,
+    F,
+    FloatField,
+    IntegerField,
+    Max,
+    OuterRef,
+    Prefetch,
+    Q,
+    Subquery,
+    Value,
+    When,
+)
+from django.db.models.functions import Coalesce, Extract, TruncDay, TruncMonth, TruncWeek
 from django.http import FileResponse, HttpResponse
 from django.middleware.csrf import get_token
 from django.shortcuts import get_object_or_404
@@ -43,8 +65,11 @@ from apps.accounts.security import (
     verify_second_factor,
 )
 from apps.api.serializers import (
+    AuditLogSerializer,
     DepartmentSerializer,
     IssueCategorySerializer,
+    IssueCommentSerializer,
+    IssueStatusEventSerializer,
     MunicipalitySerializer,
     PublicIssueRowSerializer,
     SettlementSerializer,
@@ -55,21 +80,31 @@ from apps.api.serializers import (
     TrackedIssueSerializer,
     UserSummarySerializer,
 )
+from apps.issues.delivery import queue_receipt_delivery
 from apps.issues.forms import CitizenIssueForm, IssueCommentForm, StaffIssueUpdateForm
+from apps.issues.image_processing import (
+    IssueImageValidationError,
+    prepare_issue_images,
+    save_issue_with_attachments,
+)
 from apps.issues.models import (
+    AttachmentDeletionState,
+    AuditLog,
+    DEFAULT_RESOLUTION_TARGET_HOURS,
     Issue,
     IssueAttachment,
     IssueCategory,
     IssueComment,
     IssueStatus,
     IssueStatusEvent,
-    SlaPolicy,
+    ResponseTarget,
 )
 from apps.issues.services import (
     apply_default_department,
     calculate_suspicious_assessment,
     can_add_issue_comment,
     can_change_issue_status,
+    can_manage_legal_hold,
     can_moderate_public_title,
     can_update_issue_assignment,
     consume_submission_rate_limit,
@@ -78,14 +113,22 @@ from apps.issues.services import (
     is_issue_due_soon,
     is_issue_overdue,
     normalize_tracking_code,
+    public_status_label,
     publish_resolution_note_update,
     status_requires_note,
     tracking_code_matches,
-    validate_issue_uploads,
     write_audit_log,
 )
 from apps.issues.views_staff import quick_status_actions, staff_issue_queryset
-from apps.municipalities.models import Department, Municipality
+from apps.municipalities.models import (
+    Department,
+    Municipality,
+    MunicipalityPublicNotice,
+    NoticePublicationState,
+)
+from config.throttling import SharedThrottleUnavailable
+
+security_logger = logging.getLogger("apps.issues.security")
 
 
 def ok(data=None, status_code=status.HTTP_200_OK, **extra):
@@ -98,8 +141,43 @@ def fail(errors, status_code=status.HTTP_400_BAD_REQUEST):
     return Response({"errors": errors}, status=status_code)
 
 
+def require_shared_throttle(view):
+    @wraps(view)
+    def guarded(request, *args, **kwargs):
+        try:
+            return view(request, *args, **kwargs)
+        except SharedThrottleUnavailable:
+            security_logger.error(
+                "shared_throttle_unavailable",
+                extra={"request_id": getattr(request, "request_id", None), "path": request.path},
+            )
+            response = fail(
+                {"detail": "Заштитата е привремено недостапна. Обиди се повторно."},
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+            response["Retry-After"] = "60"
+            return response
+
+    return guarded
+
+
 def get_municipality_or_404(municipality_slug):
     return get_object_or_404(Municipality, slug=municipality_slug, is_active=True)
+
+
+def ordered_municipality_settlements(municipality):
+    namesake = municipality.name.removeprefix("Општина ").strip()
+    return (
+        municipality.settlements.filter(is_active=True)
+        .annotate(
+            namesake_order=Case(
+                When(name=namesake, then=Value(0)),
+                default=Value(1),
+                output_field=IntegerField(),
+            )
+        )
+        .order_by("namesake_order", "name")
+    )
 
 
 def legal_payload(kind):
@@ -125,8 +203,16 @@ def legal_payload(kind):
 
 
 def add_issue_api_fields(user, issue):
-    issue.is_overdue = is_issue_overdue(issue)
-    issue.is_due_soon = is_issue_due_soon(issue)
+    issue.is_overdue = (
+        bool(issue.target_overdue)
+        if hasattr(issue, "target_overdue")
+        else is_issue_overdue(issue)
+    )
+    issue.is_due_soon = (
+        bool(issue.target_due_soon)
+        if hasattr(issue, "target_due_soon")
+        else is_issue_due_soon(issue)
+    )
     issue.quick_status_actions = [
         {"value": value, "label": label} for value, label in quick_status_actions(user, issue)
     ]
@@ -135,8 +221,78 @@ def add_issue_api_fields(user, issue):
         "can_change_status": can_change_issue_status(user, issue),
         "can_comment": can_add_issue_comment(user, issue),
         "can_moderate_public_title": can_moderate_public_title(user, issue),
+        "can_manage_legal_hold": can_manage_legal_hold(user, issue),
     }
     return issue
+
+
+def conflict_response(issue):
+    return Response(
+        {
+            "errors": {"detail": "Пријавата е променета од друг корисник."},
+            "meta": {"current_version": issue.version},
+        },
+        status=status.HTTP_409_CONFLICT,
+    )
+
+
+def check_expected_version(request, issue):
+    try:
+        expected = int(request.data.get("expected_version"))
+    except (TypeError, ValueError):
+        return fail({"expected_version": ["Испратете ја верзијата што ја уредувате."]})
+    if expected != issue.version:
+        return conflict_response(issue)
+    return None
+
+
+def load_staff_issue_detail(user, pk):
+    comment_counts = (
+        IssueComment.objects.filter(issue_id=OuterRef("pk"))
+        .values("issue_id")
+        .annotate(total=Count("pk"))
+        .values("total")
+    )
+    status_counts = (
+        IssueStatusEvent.objects.filter(issue_id=OuterRef("pk"))
+        .values("issue_id")
+        .annotate(total=Count("pk"))
+        .values("total")
+    )
+    issue = get_object_or_404(
+        staff_issue_queryset(user)
+        .annotate(
+            comments_count=Coalesce(Subquery(comment_counts[:1]), Value(0)),
+            status_events_count=Coalesce(Subquery(status_counts[:1]), Value(0)),
+        )
+        .prefetch_related(
+            "attachments",
+            Prefetch(
+                "comments",
+                queryset=IssueComment.objects.select_related("author").order_by(
+                    "-created_at", "-pk"
+                )[:20],
+                to_attr="bounded_comments",
+            ),
+            Prefetch(
+                "status_events",
+                queryset=IssueStatusEvent.objects.select_related("changed_by").order_by(
+                    "-created_at", "-pk"
+                )[:20],
+                to_attr="bounded_status_events",
+            ),
+        ),
+        pk=pk,
+    )
+    issue.bounded_audit_logs = list(
+        AuditLog.objects.filter(object_type="Issue", object_id=str(issue.pk))
+        .select_related("actor")
+        .order_by("-created_at", "-pk")[:20]
+    )
+    issue.audit_logs_count = AuditLog.objects.filter(
+        object_type="Issue", object_id=str(issue.pk)
+    ).count()
+    return add_issue_api_fields(user, issue)
 
 
 def staff_filter_queryset(request):
@@ -192,6 +348,7 @@ def session_view(request):
 @api_view(["POST"])
 @permission_classes([AllowAny])
 @csrf_protect
+@require_shared_throttle
 def login_view(request):
     username = str(request.data.get("username", "")).strip()
     password = request.data.get("password", "")
@@ -317,6 +474,7 @@ def totp_setup(request):
 @api_view(["POST"])
 @permission_classes([AllowAny])
 @csrf_protect
+@require_shared_throttle
 @transaction.atomic
 def totp_confirm(request):
     user = _auth_user_for_security_flow(request)
@@ -369,6 +527,7 @@ def totp_confirm(request):
 @api_view(["POST"])
 @permission_classes([AllowAny])
 @csrf_protect
+@require_shared_throttle
 def verify_two_factor(request):
     user = pending_user(request)
     if not user:
@@ -545,7 +704,7 @@ def form_options(request, municipality_slug):
         {
             "municipality": MunicipalitySerializer(municipality).data,
             "settlements": SettlementSerializer(
-                municipality.settlements.filter(is_active=True), many=True
+                ordered_municipality_settlements(municipality), many=True
             ).data,
             "categories": IssueCategorySerializer(categories, many=True).data,
         }
@@ -554,16 +713,14 @@ def form_options(request, municipality_slug):
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
+@require_shared_throttle
 def submit_issue(request, municipality_slug):
     municipality = get_municipality_or_404(municipality_slug)
     form = CitizenIssueForm(request.data, municipality=municipality)
     files = request.FILES.getlist("photos")
-    upload_errors = validate_issue_uploads(files)
-    if not form.is_valid() or upload_errors:
-        errors = dict(form.errors)
-        if upload_errors:
-            errors["photos"] = upload_errors
-        return fail(errors)
+    form_is_valid = form.is_valid()
+    if not form_is_valid:
+        return fail(dict(form.errors))
     ip_hash = hash_client_value(get_client_ip(request))
     allowed, rate_state = consume_submission_rate_limit(municipality, ip_hash)
     if not allowed:
@@ -580,42 +737,37 @@ def submit_issue(request, municipality_slug):
         )
         response["Retry-After"] = str(rate_state.retry_after_seconds)
         return response
-    with transaction.atomic():
-        issue = form.save(commit=False)
-        issue.municipality = municipality
-        issue.submitted_ip_hash = ip_hash
-        issue.submitted_user_agent_hash = hash_client_value(
-            request.META.get("HTTP_USER_AGENT", "")[:500]
-        )
-        issue.suspicious_score, issue.suspicious_reasons = calculate_suspicious_assessment(
-            files,
-            rate_state,
-            municipality=municipality,
-            ip_hash=ip_hash,
-            description=issue.description,
-            location_text=issue.location_text,
-        )
-        issue.save()
-        for file in files[: settings.MAX_ISSUE_PHOTOS]:
-            IssueAttachment.objects.create(issue=issue, image=file)
+    try:
+        processed_images = prepare_issue_images(files)
+    except IssueImageValidationError as exc:
+        return fail({"photos": exc.errors})
+    issue = form.save(commit=False)
+    issue.municipality = municipality
+    issue.submitted_ip_hash = ip_hash
+    issue.submitted_user_agent_hash = hash_client_value(
+        request.META.get("HTTP_USER_AGENT", "")[:500]
+    )
+    issue.suspicious_score, issue.suspicious_reasons = calculate_suspicious_assessment(
+        files,
+        rate_state,
+        municipality=municipality,
+        ip_hash=ip_hash,
+        description=issue.description,
+        location_text=issue.location_text,
+    )
+    save_issue_with_attachments(issue, processed_images)
 
     receipt_delivery = "not_requested"
     if form.cleaned_data.get("send_receipt"):
         try:
-            delivered = send_mail(
-                subject=f"Потврда за пријава {issue.tracking_code}",
-                message=(
-                    f"Вашата пријава до {municipality.name} е примена.\n\n"
-                    f"Код за следење: {issue.tracking_code}\n"
-                    "Кодот чувајте го приватно и користете го за проверка на статусот."
-                ),
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=[issue.citizen_email],
-                fail_silently=False,
-            )
-            receipt_delivery = "sent" if delivered else "failed"
+            queue_receipt_delivery(issue)
         except Exception:
+            security_logger.exception(
+                "receipt_delivery_record_failed", extra={"issue_id": issue.pk}
+            )
             receipt_delivery = "failed"
+        else:
+            receipt_delivery = "queued"
     return ok(
         {
             "id": issue.pk,
@@ -671,7 +823,7 @@ def _suppressed_distribution(rows, label_key):
     return visible, suppressed
 
 
-def build_public_statistics(request, municipality):
+def _legacy_build_public_statistics(request, municipality):
     period = request.query_params.get("period", "90")
     if period not in STATISTICS_PERIODS:
         period = "90"
@@ -737,25 +889,24 @@ def build_public_statistics(request, municipality):
             {"bucket": key, "total": None if suppressed else total, "suppressed": suppressed}
         )
 
-    triage_hours = [
+    review_hours = [
         (issue.triaged_at - issue.submitted_at).total_seconds() / 3600
         for issue in issue_rows
         if issue.triaged_at and issue.triaged_at >= issue.submitted_at
     ]
     resolution_hours = []
-    resolved_within_sla = []
-    policies = list(SlaPolicy.objects.filter(municipality=municipality))
-    category_policies = {policy.category_id: policy for policy in policies if policy.category_id}
-    default_policy = next((policy for policy in policies if not policy.category_id), None)
+    resolved_within_target = []
+    target = ResponseTarget.objects.filter(municipality=municipality).first()
     for issue in issue_rows:
         resolved_at = issue.resolved_at or issue.closed_at
         if not resolved_at or resolved_at < issue.submitted_at:
             continue
         elapsed = (resolved_at - issue.submitted_at).total_seconds() / 3600
         resolution_hours.append(elapsed)
-        policy = category_policies.get(issue.category_id) or default_policy
-        allowed_hours = policy.resolution_hours if policy else 240
-        resolved_within_sla.append(elapsed <= allowed_hours)
+        allowed_hours = (
+            target.resolution_hours if target else DEFAULT_RESOLUTION_TARGET_HOURS
+        )
+        resolved_within_target.append(elapsed <= allowed_hours)
 
     recent_reports = list(
         issues.filter(public_title_approved_at__isnull=False)
@@ -773,7 +924,7 @@ def build_public_statistics(request, municipality):
         },
         "filter_options": {
             "settlements": SettlementSerializer(
-                municipality.settlements.filter(is_active=True), many=True
+                ordered_municipality_settlements(municipality), many=True
             ).data,
             "categories": IssueCategorySerializer(
                 IssueCategory.objects.filter(is_active=True).filter(
@@ -796,13 +947,13 @@ def build_public_statistics(request, municipality):
         "by_settlement": by_settlement,
         "by_category": by_category,
         "performance": {
-            "median_first_response_hours": round(median(triage_hours), 1) if triage_hours else None,
+            "median_review_hours": round(median(review_hours), 1) if review_hours else None,
             "median_resolution_hours": round(median(resolution_hours), 1)
             if resolution_hours
             else None,
-            "resolved_within_sla_percent": (
-                round(sum(resolved_within_sla) * 100 / len(resolved_within_sla), 1)
-                if resolved_within_sla
+            "resolved_within_target_percent": (
+                round(sum(resolved_within_target) * 100 / len(resolved_within_target), 1)
+                if resolved_within_target
                 else None
             ),
         },
@@ -817,12 +968,251 @@ def build_public_statistics(request, municipality):
             ),
         },
         "definitions": {
-            "first_response": "Време од поднесување до првата службена проверка.",
+            "review": "Време од поднесување до првата службена проверка.",
             "resolution": "Време од поднесување до решавање или затворање.",
-            "sla": "Удел на решени пријави во рокот за категоријата, со општински рок како замена.",
+            "target": "Удел на решени пријави во општинскиот целен рок.",
         },
         "last_updated": latest,
     }
+
+
+class PercentileCont(Aggregate):
+    function = "PERCENTILE_CONT"
+    template = "%(function)s(0.5) WITHIN GROUP (ORDER BY %(expressions)s)"
+    output_field = FloatField()
+
+
+def _statistics_filters(request):
+    period = request.query_params.get("period", "90")
+    if period not in STATISTICS_PERIODS:
+        period = "90"
+    public_status = request.query_params.get("status", "")
+    if public_status not in PUBLIC_STATUS_GROUPS:
+        public_status = ""
+    def identifier(name):
+        value = request.query_params.get(name, "")
+        return int(value) if value.isdigit() and int(value) > 0 else ""
+
+    return {
+        "period": period,
+        "settlement": identifier("settlement"),
+        "category": identifier("category"),
+        "status": public_status,
+    }
+
+
+def _statistics_queryset(municipality, filters):
+    issues = Issue.objects.filter(municipality=municipality, is_spam=False).exclude(
+        status=IssueStatus.REJECTED_SPAM
+    )
+    days = STATISTICS_PERIODS[filters["period"]]
+    if days:
+        issues = issues.filter(submitted_at__gte=timezone.now() - timedelta(days=days))
+    if filters["settlement"]:
+        issues = issues.filter(settlement_id=filters["settlement"])
+    if filters["category"]:
+        issues = issues.filter(category_id=filters["category"])
+    if filters["status"]:
+        issues = issues.filter(status__in=PUBLIC_STATUS_GROUPS[filters["status"]])
+    return issues
+
+
+def _compute_public_statistics(request, municipality, filters):
+    issues = _statistics_queryset(municipality, filters)
+    terminal = [
+        IssueStatus.RESOLVED,
+        IssueStatus.CLOSED,
+        IssueStatus.DUPLICATE,
+        IssueStatus.REJECTED_SPAM,
+        IssueStatus.NOT_JURISDICTION,
+    ]
+    stats = issues.aggregate(
+        total=Count("id"),
+        open=Count("id", filter=~Q(status__in=terminal)),
+        resolved=Count(
+            "id", filter=Q(status__in=[IssueStatus.RESOLVED, IssueStatus.CLOSED])
+        ),
+        pending=Count("id", filter=Q(status=IssueStatus.PENDING_TRIAGE)),
+    )
+    settlement_rows = list(
+        issues.values("settlement__name").annotate(total=Count("id")).order_by(
+            "settlement__name"
+        )
+    )
+    category_rows = list(
+        issues.values("category__name").annotate(total=Count("id")).order_by(
+            "category__name"
+        )
+    )
+    by_settlement, suppressed_settlements = _suppressed_distribution(
+        settlement_rows, "settlement__name"
+    )
+    by_category, suppressed_categories = _suppressed_distribution(
+        category_rows, "category__name"
+    )
+
+    truncation = {
+        "30": TruncDay("submitted_at"),
+        "90": TruncWeek("submitted_at"),
+        "365": TruncMonth("submitted_at"),
+        "all": TruncMonth("submitted_at"),
+    }[filters["period"]]
+    bucket_rows = list(
+        issues.annotate(bucket=truncation)
+        .values("bucket")
+        .annotate(total=Count("id"))
+        .order_by("bucket")
+    )
+    time_series = []
+    suppressed_buckets = 0
+    for row in bucket_rows:
+        suppressed = row["total"] < MIN_PUBLIC_GROUP_SIZE
+        suppressed_buckets += int(suppressed)
+        time_series.append(
+            {
+                "bucket": row["bucket"].date().isoformat(),
+                "total": None if suppressed else row["total"],
+                "suppressed": suppressed,
+            }
+        )
+
+    performance_rows = issues.annotate(
+        review_hours=ExpressionWrapper(
+            Extract(F("triaged_at") - F("submitted_at"), "epoch") / Value(3600.0),
+            output_field=FloatField(),
+        ),
+        resolution_moment=Coalesce("resolved_at", "closed_at"),
+        target_resolution_hours=Coalesce(
+            "municipality__response_target__resolution_hours",
+            Value(DEFAULT_RESOLUTION_TARGET_HOURS),
+        ),
+    ).annotate(
+        resolution_hours=ExpressionWrapper(
+            Extract(F("resolution_moment") - F("submitted_at"), "epoch") / Value(3600.0),
+            output_field=FloatField(),
+        )
+    )
+    performance = performance_rows.aggregate(
+        median_review_hours=PercentileCont(
+            "review_hours", filter=Q(triaged_at__gte=F("submitted_at"))
+        ),
+        median_resolution_hours=PercentileCont(
+            "resolution_hours", filter=Q(resolution_moment__gte=F("submitted_at"))
+        ),
+        resolved_within_target=Avg(
+            Case(
+                When(resolution_hours__isnull=True, then=None),
+                When(
+                    resolution_hours__lte=F("target_resolution_hours"),
+                    then=Value(1.0),
+                ),
+                default=Value(0.0),
+                output_field=FloatField(),
+            )
+        ),
+    )
+    recent_reports = [
+        {
+            "title": row["public_title"],
+            "submitted_at": row["submitted_at"],
+            "status": row["status"],
+            "status_label": public_status_label(row["status"]),
+        }
+        for row in issues.filter(public_title_approved_at__isnull=False)
+        .exclude(public_title="")
+        .order_by("-submitted_at")
+        .values("public_title", "submitted_at", "status")[:20]
+    ]
+    latest = issues.aggregate(value=Max("updated_at"))["value"]
+    return {
+        "municipality": MunicipalitySerializer(
+            municipality, context={"request": request}
+        ).data,
+        "applied_filters": {
+            key: value or None for key, value in filters.items()
+        },
+        "filter_options": {
+            "settlements": SettlementSerializer(
+                ordered_municipality_settlements(municipality), many=True
+            ).data,
+            "categories": IssueCategorySerializer(
+                IssueCategory.objects.filter(is_active=True).filter(
+                    municipality__in=[municipality, None]
+                ),
+                many=True,
+            ).data,
+            "statuses": [
+                {"value": "submitted", "label": "Примени"},
+                {"value": "verified", "label": "Проверени"},
+                {"value": "assigned", "label": "Доделени"},
+                {"value": "in_progress", "label": "Во тек"},
+                {"value": "resolved", "label": "Решени"},
+                {"value": "exceptional", "label": "Исклучителен исход"},
+            ],
+        },
+        "stats": stats,
+        "recent_reports": recent_reports,
+        "time_series": time_series,
+        "by_settlement": by_settlement,
+        "by_category": by_category,
+        "performance": {
+            "median_review_hours": round(performance["median_review_hours"], 1)
+            if performance["median_review_hours"] is not None
+            else None,
+            "median_resolution_hours": round(performance["median_resolution_hours"], 1)
+            if performance["median_resolution_hours"] is not None
+            else None,
+            "resolved_within_target_percent": round(
+                performance["resolved_within_target"] * 100, 1
+            )
+            if performance["resolved_within_target"] is not None
+            else None,
+        },
+        "suppression": {
+            "minimum_group_size": MIN_PUBLIC_GROUP_SIZE,
+            "suppressed_time_buckets": suppressed_buckets,
+            "suppressed_category_groups": suppressed_categories,
+            "suppressed_settlement_groups": suppressed_settlements,
+            "message": "Групите со помалку од 5 пријави не се прикажуваат за заштита на приватноста.",
+        },
+        "definitions": {
+            "review": "Време од поднесување до првата службена проверка.",
+            "resolution": "Време од поднесување до решавање или затворање.",
+            "target": "Удел на решени пријави во општинскиот целен рок.",
+        },
+        "last_updated": latest,
+    }
+
+
+def build_public_statistics(request, municipality):
+    filters = _statistics_filters(request)
+    digest = hashlib.sha256(
+        json.dumps(filters, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:20]
+    cache_key = f"statistics:{municipality.pk}:{municipality.statistics_version}:{digest}"
+    stale_key = f"statistics:stale:{municipality.pk}:{digest}"
+    lock_key = f"statistics:lock:{municipality.pk}:{digest}"
+    lock_acquired = False
+    try:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+        lock_acquired = cache.add(lock_key, True, timeout=15)
+        if not lock_acquired:
+            stale = cache.get(stale_key)
+            if stale is not None:
+                return stale
+    except Exception:
+        lock_acquired = False
+    payload = _compute_public_statistics(request, municipality, filters)
+    try:
+        cache.set(cache_key, payload, timeout=5 * 60)
+        cache.set(stale_key, payload, timeout=15 * 60)
+        if lock_acquired:
+            cache.delete(lock_key)
+    except Exception:
+        pass
+    return payload
 
 
 @api_view(["GET"])
@@ -872,17 +1262,19 @@ def track_issue(request, municipality_slug):
     if not code:
         return fail({"code": ["Внеси код за следење."]})
     issue = (
-        Issue.objects.filter(municipality=municipality, tracking_code__iexact=code)
+        Issue.objects.filter(municipality=municipality, tracking_code=code)
         .select_related("settlement", "category")
         .prefetch_related(
             Prefetch(
                 "comments",
-                queryset=IssueComment.objects.filter(is_internal=False).select_related("author"),
+                queryset=IssueComment.objects.filter(is_internal=False)
+                .select_related("author")
+                .order_by("-created_at", "-pk")[:100],
                 to_attr="public_comments",
             ),
             Prefetch(
                 "status_events",
-                queryset=IssueStatusEvent.objects.all(),
+                queryset=IssueStatusEvent.objects.order_by("-created_at", "-pk")[:100],
                 to_attr="public_status_events",
             ),
         )
@@ -897,16 +1289,27 @@ def track_issue(request, municipality_slug):
 @permission_classes([IsAuthenticated])
 def staff_choices(request):
     profile = getattr(request.user, "staffprofile", None)
+    try:
+        choices_version = cache.get("staff-choices:version", 1)
+        choices_cache_key = (
+            f"staff-choices:{choices_version}:{request.user.pk}:"
+            f"{getattr(profile, 'municipality_id', 0)}:{int(request.user.is_superuser)}"
+        )
+        cached_choices = cache.get(choices_cache_key)
+        if cached_choices is not None:
+            return ok(cached_choices)
+    except Exception:
+        choices_cache_key = None
     if request.user.is_superuser:
         municipalities = Municipality.objects.all()
-        departments = Department.objects.filter(is_active=True)
+        departments = Department.objects.filter(is_active=True).select_related("municipality")
         assignees = get_user_model().objects.filter(staffprofile__isnull=False, is_active=True)
     elif profile and profile.municipality_id:
         municipalities = Municipality.objects.filter(pk=profile.municipality_id)
         departments = Department.objects.filter(
             municipality_id=profile.municipality_id,
             is_active=True,
-        )
+        ).select_related("municipality")
         assignees = get_user_model().objects.filter(
             staffprofile__municipality_id=profile.municipality_id,
             is_active=True,
@@ -915,6 +1318,33 @@ def staff_choices(request):
         municipalities = Municipality.objects.none()
         departments = Department.objects.none()
         assignees = get_user_model().objects.none()
+    terminal = [
+        IssueStatus.RESOLVED,
+        IssueStatus.CLOSED,
+        IssueStatus.DUPLICATE,
+        IssueStatus.REJECTED_SPAM,
+        IssueStatus.NOT_JURISDICTION,
+    ]
+    municipalities = municipalities.annotate(
+        active_report_count_value=Count("issues", filter=~Q(issues__status__in=terminal))
+    ).prefetch_related(
+        Prefetch(
+            "public_notices",
+            queryset=MunicipalityPublicNotice.objects.filter(
+                publication_state=NoticePublicationState.PUBLISHED,
+                published_at__isnull=False,
+                published_at__lte=timezone.now(),
+            ).order_by("-published_at", "-created_at"),
+            to_attr="published_public_notices",
+        )
+    )
+    assignees = assignees.select_related(
+        "staffprofile__municipality", "staffprofile__department"
+    ).annotate(
+        two_factor_enabled_annotation=Exists(
+            TOTPDevice.objects.filter(user_id=OuterRef("pk"), confirmed=True)
+        )
+    )
     choices = StaffChoicesSerializer({}).data
     choices.update(
         {
@@ -924,6 +1354,11 @@ def staff_choices(request):
             "show_configuration_warning": request.user.is_superuser,
         }
     )
+    if choices_cache_key:
+        try:
+            cache.set(choices_cache_key, choices, timeout=5 * 60)
+        except Exception:
+            pass
     return ok(choices)
 
 
@@ -932,13 +1367,10 @@ def staff_choices(request):
 def staff_issues(request):
     issues = staff_filter_queryset(request)
     base = staff_issue_queryset(request.user)
-    base_rows = list(base)
-    overdue_ids = [issue.pk for issue in base_rows if is_issue_overdue(issue)]
-    due_soon_ids = [issue.pk for issue in base_rows if is_issue_due_soon(issue)]
     if request.query_params.get("overdue") == "1":
-        issues = issues.filter(pk__in=overdue_ids)
+        issues = issues.filter(target_overdue=True)
     if request.query_params.get("due_soon") == "1":
-        issues = issues.filter(pk__in=due_soon_ids)
+        issues = issues.filter(target_due_soon=True)
 
     allowed_sorting = {
         "submitted_at": "submitted_at",
@@ -966,25 +1398,25 @@ def staff_issues(request):
     rows = [
         add_issue_api_fields(request.user, issue) for issue in issues[start : start + page_size]
     ]
+    terminal_statuses = [
+        IssueStatus.RESOLVED,
+        IssueStatus.CLOSED,
+        IssueStatus.DUPLICATE,
+        IssueStatus.REJECTED_SPAM,
+        IssueStatus.NOT_JURISDICTION,
+    ]
+    metrics = base.aggregate(
+        total=Count("id"),
+        pending=Count("id", filter=Q(status=IssueStatus.PENDING_TRIAGE)),
+        open=Count("id", filter=~Q(status__in=terminal_statuses)),
+        my=Count("id", filter=Q(assigned_to=request.user)),
+        unassigned=Count("id", filter=Q(assigned_to__isnull=True)),
+        overdue=Count("id", filter=Q(target_overdue=True)),
+        due_soon=Count("id", filter=Q(target_due_soon=True)),
+    )
     return ok(
         {
-            "metrics": {
-                "total": base.count(),
-                "pending": base.filter(status=IssueStatus.PENDING_TRIAGE).count(),
-                "open": base.exclude(
-                    status__in=[
-                        IssueStatus.RESOLVED,
-                        IssueStatus.CLOSED,
-                        IssueStatus.DUPLICATE,
-                        IssueStatus.REJECTED_SPAM,
-                        IssueStatus.NOT_JURISDICTION,
-                    ]
-                ).count(),
-                "my": base.filter(assigned_to=request.user).count(),
-                "unassigned": base.filter(assigned_to__isnull=True).count(),
-                "overdue": len(overdue_ids),
-                "due_soon": len(due_soon_ids),
-            },
+            "metrics": metrics,
             "items": StaffIssueListSerializer(rows, many=True).data,
             "pagination": {
                 "page": page,
@@ -1002,13 +1434,16 @@ def staff_issues(request):
 @permission_classes([IsAuthenticated])
 @transaction.atomic
 def staff_bulk_assign(request):
-    raw_ids = request.data.get("issue_ids")
-    if not isinstance(raw_ids, list) or not raw_ids or len(raw_ids) > 100:
-        return fail({"issue_ids": ["Изберете од 1 до 100 пријави."]})
+    raw_items = request.data.get("issues")
+    if not isinstance(raw_items, list) or not raw_items or len(raw_items) > 100:
+        return fail({"issues": ["Изберете од 1 до 100 пријави со нивните верзии."]})
     try:
-        issue_ids = list(dict.fromkeys(int(value) for value in raw_ids))
-    except (TypeError, ValueError):
-        return fail({"issue_ids": ["Идентификаторите не се валидни."]})
+        expected_versions = {int(item["id"]): int(item["expected_version"]) for item in raw_items}
+        issue_ids = list(expected_versions)
+    except (KeyError, TypeError, ValueError):
+        return fail({"issues": ["Идентификаторите или верзиите не се валидни."]})
+    if len(issue_ids) != len(raw_items):
+        return fail({"issues": ["Истата пријава не може да биде избрана двапати."]})
 
     authorized_ids = staff_issue_queryset(request.user).filter(pk__in=issue_ids).values("pk")
     authorized = list(Issue.objects.select_for_update().filter(pk__in=authorized_ids))
@@ -1018,6 +1453,15 @@ def staff_bulk_assign(request):
         return fail(
             {"detail": "Немате дозвола за една или повеќе избрани пријави."},
             status.HTTP_403_FORBIDDEN,
+        )
+    stale = [issue for issue in authorized if expected_versions[issue.pk] != issue.version]
+    if stale:
+        return Response(
+            {
+                "errors": {"detail": "Една или повеќе пријави се променети."},
+                "meta": {"current_versions": {str(issue.pk): issue.version for issue in stale}},
+            },
+            status=status.HTTP_409_CONFLICT,
         )
     municipality_ids = {issue.municipality_id for issue in authorized}
     if len(municipality_ids) != 1:
@@ -1056,8 +1500,15 @@ def staff_bulk_assign(request):
         if assignee:
             issue.assigned_to = assignee
         issue.assigned_at = issue.assigned_at or now
+        issue.version += 1
         issue.save(
-            update_fields=["assigned_department", "assigned_to", "assigned_at", "updated_at"]
+            update_fields=[
+                "assigned_department",
+                "assigned_to",
+                "assigned_at",
+                "version",
+                "updated_at",
+            ]
         )
         write_audit_log(
             request.user,
@@ -1071,23 +1522,29 @@ def staff_bulk_assign(request):
                 },
             },
         )
-    return ok({"updated": len(authorized), "issue_ids": issue_ids})
+    return ok(
+        {
+            "updated": len(authorized),
+            "issues": [{"id": issue.pk, "version": issue.version} for issue in authorized],
+        }
+    )
 
 
 @api_view(["GET", "PATCH"])
 @permission_classes([IsAuthenticated])
+@transaction.atomic
 def staff_issue_detail(request, pk):
-    issue = get_object_or_404(
-        staff_issue_queryset(request.user).prefetch_related(
-            "attachments", "comments", "status_events"
-        ),
-        pk=pk,
-    )
     if request.method == "PATCH":
+        issue = get_object_or_404(
+            staff_issue_queryset(request.user).select_for_update(of=("self",)), pk=pk
+        )
         if not can_update_issue_assignment(request.user, issue):
             return fail(
                 {"detail": "Немате дозвола да ја ажурирате пријавата."}, status.HTTP_403_FORBIDDEN
             )
+        conflict = check_expected_version(request, issue)
+        if conflict:
+            return conflict
         old_values = {
             "priority": issue.priority,
             "assigned_department_id": issue.assigned_department_id,
@@ -1098,6 +1555,7 @@ def staff_issue_detail(request, pk):
         form = StaffIssueUpdateForm(request.data, instance=issue, issue=issue)
         if not form.is_valid():
             return fail(form.errors)
+        issue.version += 1
         form.save()
         issue.refresh_from_db()
         new_values = {
@@ -1122,7 +1580,7 @@ def staff_issue_detail(request, pk):
             request.user,
             old_values["public_resolution_note"],
         )
-    issue = add_issue_api_fields(request.user, issue)
+    issue = load_staff_issue_detail(request.user, pk)
     return ok(StaffIssueDetailSerializer(issue).data)
 
 
@@ -1138,6 +1596,9 @@ def approve_public_title(request, pk):
             {"detail": "Немате дозвола да одобрувате јавни наслови."},
             status.HTTP_403_FORBIDDEN,
         )
+    conflict = check_expected_version(request, issue)
+    if conflict:
+        return conflict
     if issue.is_spam or issue.status == IssueStatus.REJECTED_SPAM:
         return fail({"detail": "Спам пријава не може да има јавен наслов."})
     public_title = " ".join(str(request.data.get("public_title", "")).split())
@@ -1147,11 +1608,13 @@ def approve_public_title(request, pk):
     issue.public_title = public_title
     issue.public_title_approved_at = timezone.now()
     issue.public_title_approved_by = request.user
+    issue.version += 1
     issue.save(
         update_fields=[
             "public_title",
             "public_title_approved_at",
             "public_title_approved_by",
+            "version",
             "updated_at",
         ]
     )
@@ -1161,8 +1624,7 @@ def approve_public_title(request, pk):
         issue=issue,
         metadata={"public_title": public_title},
     )
-    issue = add_issue_api_fields(request.user, issue)
-    return ok(StaffIssueDetailSerializer(issue).data)
+    return ok(StaffIssueDetailSerializer(load_staff_issue_detail(request.user, pk)).data)
 
 
 @api_view(["POST"])
@@ -1177,28 +1639,35 @@ def revoke_public_title(request, pk):
             {"detail": "Немате дозвола да повлекувате јавни наслови."},
             status.HTTP_403_FORBIDDEN,
         )
+    conflict = check_expected_version(request, issue)
+    if conflict:
+        return conflict
     was_approved = bool(issue.public_title_approved_at)
     issue.public_title = ""
     issue.public_title_approved_at = None
     issue.public_title_approved_by = None
+    issue.version += 1
     issue.save(
         update_fields=[
             "public_title",
             "public_title_approved_at",
             "public_title_approved_by",
+            "version",
             "updated_at",
         ]
     )
     if was_approved:
         write_audit_log(request.user, "issue_public_title_revoked", issue=issue)
-    issue = add_issue_api_fields(request.user, issue)
-    return ok(StaffIssueDetailSerializer(issue).data)
+    return ok(StaffIssueDetailSerializer(load_staff_issue_detail(request.user, pk)).data)
 
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
+@transaction.atomic
 def staff_issue_status(request, pk):
-    issue = get_object_or_404(staff_issue_queryset(request.user), pk=pk)
+    issue = get_object_or_404(
+        staff_issue_queryset(request.user).select_for_update(of=("self",)), pk=pk
+    )
     new_status = request.data.get("status")
     note = request.data.get("note", "")
     valid = {choice[0] for choice in IssueStatus.choices}
@@ -1208,12 +1677,17 @@ def staff_issue_status(request, pk):
         return fail(
             {"detail": "Немате дозвола да го промените статусот."}, status.HTTP_403_FORBIDDEN
         )
+    conflict = check_expected_version(request, issue)
+    if conflict:
+        return conflict
     if status_requires_note(new_status) and not note.strip():
         return fail({"note": ["За овој статус мора да внесете белешка."]})
+    if len(note) > 2000:
+        return fail({"note": ["Белешката може да содржи најмногу 2.000 знаци."]})
     old_status = issue.status
     old_department_id = issue.assigned_department_id
     apply_default_department(issue, new_status)
-    issue.mark_status(new_status, user=request.user, note=note)
+    status_event = issue.mark_status(new_status, user=request.user, note=note)
     write_audit_log(
         request.user,
         "issue_status_changed",
@@ -1221,13 +1695,13 @@ def staff_issue_status(request, pk):
         metadata={
             "from_status": old_status,
             "to_status": new_status,
-            "note": note,
+            "status_event_id": status_event.pk if status_event else None,
             "default_department_applied": bool(
                 not old_department_id and issue.assigned_department_id
             ),
         },
     )
-    return ok(StaffIssueDetailSerializer(add_issue_api_fields(request.user, issue)).data)
+    return ok(StaffIssueDetailSerializer(load_staff_issue_detail(request.user, pk)).data)
 
 
 @api_view(["POST"])
@@ -1249,7 +1723,115 @@ def staff_issue_comments(request, pk):
         issue=issue,
         metadata={"comment_id": comment.pk, "is_internal": comment.is_internal},
     )
-    return ok(StaffIssueDetailSerializer(add_issue_api_fields(request.user, issue)).data)
+    return ok(StaffIssueDetailSerializer(load_staff_issue_detail(request.user, pk)).data)
+
+
+def _history_page(request, queryset, serializer_class):
+    try:
+        limit = min(100, max(1, int(request.query_params.get("limit", 50))))
+    except ValueError:
+        limit = 50
+    cursor = request.query_params.get("cursor")
+    if cursor:
+        try:
+            queryset = queryset.filter(pk__lt=int(cursor))
+        except ValueError:
+            return None, fail({"cursor": ["Курсорот не е валиден."]})
+    rows = list(queryset.order_by("-created_at", "-pk")[: limit + 1])
+    has_next = len(rows) > limit
+    rows = rows[:limit]
+    return {
+        "items": serializer_class(rows, many=True).data,
+        "next_cursor": str(rows[-1].pk) if has_next and rows else None,
+    }, None
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def staff_issue_comment_history(request, pk):
+    issue = get_object_or_404(staff_issue_queryset(request.user), pk=pk)
+    queryset = IssueComment.objects.filter(issue=issue).select_related("author")
+    total = queryset.count()
+    payload, error = _history_page(request, queryset, IssueCommentSerializer)
+    if error:
+        return error
+    payload["total"] = total
+    return ok(payload)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def staff_issue_status_history(request, pk):
+    issue = get_object_or_404(staff_issue_queryset(request.user), pk=pk)
+    queryset = IssueStatusEvent.objects.filter(issue=issue).select_related("changed_by")
+    total = queryset.count()
+    payload, error = _history_page(request, queryset, IssueStatusEventSerializer)
+    if error:
+        return error
+    payload["total"] = total
+    return ok(payload)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def staff_issue_audit_history(request, pk):
+    issue = get_object_or_404(staff_issue_queryset(request.user), pk=pk)
+    queryset = AuditLog.objects.filter(
+        object_type="Issue", object_id=str(issue.pk)
+    ).select_related("actor")
+    total = queryset.count()
+    payload, error = _history_page(request, queryset, AuditLogSerializer)
+    if error:
+        return error
+    payload["total"] = total
+    return ok(payload)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@transaction.atomic
+def staff_issue_legal_hold(request, pk):
+    issue = get_object_or_404(
+        staff_issue_queryset(request.user).select_for_update(of=("self",)), pk=pk
+    )
+    if not can_manage_legal_hold(request.user, issue):
+        return fail(
+            {"detail": "Немате дозвола да управувате со правно задржување."},
+            status.HTTP_403_FORBIDDEN,
+        )
+    conflict = check_expected_version(request, issue)
+    if conflict:
+        return conflict
+    active = request.data.get("active")
+    if not isinstance(active, bool):
+        return fail({"active": ["Испратете true или false."]})
+    reason = str(request.data.get("reason", "")).strip()
+    if active and not reason:
+        return fail({"reason": ["Причината е задолжителна при вклучување."]})
+    if len(reason) > 2000:
+        return fail({"reason": ["Причината може да содржи најмногу 2.000 знаци."]})
+    issue.legal_hold_active = active
+    issue.legal_hold_reason = reason if active else ""
+    issue.legal_hold_set_by = request.user
+    issue.legal_hold_set_at = timezone.now()
+    issue.version += 1
+    issue.save(
+        update_fields=[
+            "legal_hold_active",
+            "legal_hold_reason",
+            "legal_hold_set_by",
+            "legal_hold_set_at",
+            "version",
+            "updated_at",
+        ]
+    )
+    write_audit_log(
+        request.user,
+        "issue_legal_hold_enabled" if active else "issue_legal_hold_released",
+        issue=issue,
+        metadata={"reason": reason if active else ""},
+    )
+    return ok(StaffIssueDetailSerializer(load_staff_issue_detail(request.user, pk)).data)
 
 
 @api_view(["GET"])
@@ -1260,6 +1842,11 @@ def staff_attachment(request, pk):
         pk=pk,
         issue__in=staff_issue_queryset(request.user),
     )
+    if attachment.deletion_state != AttachmentDeletionState.ACTIVE:
+        return fail(
+            {"detail": "Фотографијата е избришана согласно политиката за задржување."},
+            status.HTTP_410_GONE,
+        )
     content_type = mimetypes.guess_type(attachment.image.name)[0] or "application/octet-stream"
     response = FileResponse(
         attachment.image.open("rb"),

@@ -23,26 +23,23 @@ flowchart TB
         MunicipalityCheck -->|Yes| FormValidation{Form valid?<br/>Consent, honeypot, scoped options,<br/>receipt requires email}
         FormValidation -->|No| ValidationError[400 field errors]
         ValidationError --> EnterReport
-        FormValidation -->|Yes| PhotoValidation{Uploads valid?<br/>count, extension, MIME,<br/>size and Pillow decode}
-        PhotoValidation -->|No| UploadError[400 photo errors]
-        UploadError --> AttachPhotos
-        PhotoValidation -->|Yes| HashClient[Resolve trusted client IP<br/>Store SHA-256 IP and user-agent hashes]
-        HashClient --> LockRateRow[Transaction: lock or create<br/>rate-limit row by municipality + IP hash]
+        FormValidation -->|Yes| HashClient[Resolve trusted client IP<br/>Store SHA-256 IP and user-agent hashes]
+        HashClient --> LockRateRow[Atomic Redis counters with TTL<br/>by municipality + IP hash]
         LockRateRow --> RateAllowed{Below configured<br/>hour and day limits?}
         RateAllowed -->|No| RateLimited[429 + Retry-After<br/>No issue created]
-        RateAllowed -->|Yes| ConsumeLimit[Increment atomic counters]
-        ConsumeLimit --> AssessRisk[Calculate suspicious score<br/>frequency + daily volume + repeated text/location + photo count]
+        RateAllowed -->|Yes| PhotoValidation{Uploads valid?<br/>count, extension, MIME,<br/>size and Pillow decode}
+        PhotoValidation -->|No| UploadError[400 photo errors<br/>reserved slot remains consumed]
+        UploadError --> AttachPhotos
+        PhotoValidation -->|Yes| AssessRisk[Calculate suspicious score<br/>frequency + daily volume + repeated text/location + photo count]
         AssessRisk --> SaveIssue[Atomic DB write:<br/>Issue in pending_triage + unique tracking code]
-        SaveIssue --> SaveAttachments[Create attachment rows and store private files]
+        SaveIssue --> SaveAttachments[Normalize to bounded WebP<br/>then create attachment rows and private files]
         SaveAttachments --> ReceiptRequested{Email receipt requested?}
         ReceiptRequested -->|No| ReceiptSkipped[receipt_delivery = not_requested]
-        ReceiptRequested -->|Yes| SendReceipt[Best-effort email with tracking code]
-        SendReceipt --> ReceiptResult{Mail delivered?}
-        ReceiptResult -->|Yes| ReceiptSent[receipt_delivery = sent]
-        ReceiptResult -->|No / exception| ReceiptFailed[receipt_delivery = failed<br/>Issue remains committed]
+        ReceiptRequested -->|Yes| SendReceipt[Create delivery record after commit<br/>queue Celery email task]
+        SendReceipt --> ReceiptQueued[receipt_delivery = queued]
         ReceiptSkipped --> SubmissionSuccess
-        ReceiptSent --> SubmissionSuccess
-        ReceiptFailed --> SubmissionSuccess[201: show tracking code<br/>and initial status]
+        ReceiptQueued --> SubmissionSuccess
+        SubmissionSuccess[201: show tracking code<br/>and initial status]
     end
 
     SubmissionSuccess --> CitizenChoice{Citizen next action}
@@ -54,7 +51,7 @@ flowchart TB
         ScopedLookup --> TrackFound{Matching report?}
         TrackFound -->|No| Track404[404 generic not-found response]
         Track404 --> EnterCode
-        TrackFound -->|Yes| BuildTimeline[Build chronological timeline:<br/>submission + public comments + all status events + public note]
+        TrackFound -->|Yes| BuildTimeline[Build chronological timeline:<br/>submission + latest public updates<br/>capped at 100]
         BuildTimeline --> TrackingView[Return safe fields only:<br/>title, category, settlement, status and public updates]
     end
 
@@ -62,8 +59,8 @@ flowchart TB
         CitizenChoice -->|View statistics| StatsRequest[GET statistics<br/>period + settlement + category + public status filters]
         StatsRequest --> StatsScope[Filter selected municipality<br/>and exclude is_spam = true]
         StatsScope --> Aggregate[Compute total/open/resolved/pending,<br/>time series, distributions and medians]
-        Aggregate --> SlaMetric[Resolve category SLA,<br/>then municipality default, then 240h fallback]
-        SlaMetric --> SuppressSmallGroups[Suppress category, settlement and<br/>time groups containing fewer than 5 reports]
+        Aggregate --> TargetMetric[Compare resolutions with the municipality target,<br/>or use the 240h fallback]
+        TargetMetric --> SuppressSmallGroups[Suppress category, settlement and<br/>time groups containing fewer than 5 reports]
         SuppressSmallGroups --> StatsOutput[Return dashboard JSON<br/>or UTF-8 CSV]
     end
 
@@ -87,8 +84,8 @@ flowchart TB
         MunicipalityScope --> InboxQuery[Build authorized issue queryset]
         EmptyScope --> StaffNoAccess[Empty dashboard]
         InboxQuery --> Filters[Apply search, municipality, status,<br/>settlement, category, priority, department,<br/>assignee, mine, unassigned, overdue and due-soon]
-        Filters --> SlaEvaluation[For each candidate, compute deadline:<br/>category SLA → municipal SLA → fallback]
-        SlaEvaluation --> InboxPage[Sort, paginate, metrics and permitted quick actions]
+        Filters --> TargetEvaluation[Compute the active municipality target:<br/>review target while pending → resolution target afterward]
+        TargetEvaluation --> InboxPage[Sort, paginate, metrics and permitted quick actions]
         InboxPage --> OpenCase[GET authorized issue detail]
         OpenCase --> DetailData[Load attachments, comments,<br/>status events and last 20 audit logs]
         DetailData --> CaseAction{Chosen case action}
@@ -278,8 +275,8 @@ It does not contain citizen contact data, hashes, description, exact location te
 3. Compute total, open, resolved, and pending counts.
 4. Build daily buckets for 30 days, weekly buckets for 90 days, or monthly buckets otherwise.
 5. Compute category and settlement distributions.
-6. Compute median triage and resolution hours.
-7. Determine resolution SLA using category override, municipality default, then 240-hour fallback.
+6. Compute median review and resolution hours.
+7. Compare resolved reports with the municipality resolution target, using a 240-hour fallback.
 8. Hide every distribution/time bucket with fewer than 5 reports.
 9. Return JSON or CSV with suppression metadata and metric definitions.
 
@@ -289,13 +286,13 @@ Current `recent_reports` output includes up to 20 titles and submission timestam
 
 | Operation | Transactional DB work | External side effect | Failure result |
 |---|---|---|---|
-| Submit report | Issue + attachment rows atomic | File writes; optional email | Mail failure does not roll back issue; storage rollback needs orphan cleanup |
-| Consume rate limit | Locked counter update atomic | None | 429 and no issue |
-| Change status | Issue update, status event, and audit are separate writes in the current API flow | None | Validation/permission failure is safe; a later write failure can leave partial history, so wrap the mutation in one transaction |
-| Update case | Issue update, audit, and optional public comment/audit are separate writes in the current API flow | None | Consider wrapping all writes in one outer transaction |
+| Submit report | Processed images prepared first; issue + attachment rows atomic | File writes; queued receipt email | Written files are deleted on transaction failure; queue/delivery failure does not roll back issue |
+| Consume rate limit | Atomic Redis fixed-window increments | Redis | Redis failure returns retryable 503 for protected writes |
+| Change status | Version check, issue update, status event, and audit are one transaction | None | Stale edits return 409; any write failure rolls back the mutation |
+| Update case | Version check, issue update, audit, and public update are one transaction | None | Stale edits return 409; any write failure rolls back the mutation |
 | Bulk assignment | Selected issues locked and updated atomically | None | Any invalid target/permission aborts batch |
 | View attachment | Read-only authorized lookup | Streams private file | Unauthorized/missing attachment returns 404 |
-| Apply retention | Per-issue row transaction | Deletes stored files | Audit records describe applied changes; storage/database atomicity is not guaranteed |
+| Apply retention | Row lock and deletion-pending marker, then tombstone update | Deletes stored files | Missing files are idempotent success; storage failures remain retryable |
 
 ## 8. Audit events
 

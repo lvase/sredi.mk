@@ -2,7 +2,11 @@ export type ApiEnvelope<T> = { data: T };
 export type ApiErrorEnvelope = {
   errors?: Record<string, unknown>;
   detail?: string;
-  meta?: { retry_after_seconds?: number };
+  meta?: {
+    retry_after_seconds?: number;
+    current_version?: number;
+    current_versions?: Record<string, number>;
+  };
 };
 
 export type Municipality = {
@@ -72,9 +76,9 @@ export type PublicStatisticsPayload = {
   by_settlement: Array<{ label: string; total: number; suppressed: false }>;
   by_category: Array<{ label: string; total: number; suppressed: false }>;
   performance: {
-    median_first_response_hours: number | null;
+    median_review_hours: number | null;
     median_resolution_hours: number | null;
-    resolved_within_sla_percent: number | null;
+    resolved_within_target_percent: number | null;
   };
   suppression: {
     minimum_group_size: number;
@@ -171,6 +175,7 @@ export type StaffMetrics = {
 
 export type StaffIssue = {
   id: number;
+  version: number;
   tracking_code: string;
   title: string;
   public_title: string;
@@ -205,7 +210,14 @@ export type StaffIssueDetail = StaffIssue & {
   suspicious_reasons: Array<{ code: string; label: string; points: number }>;
   public_resolution_note: string;
   internal_note: string;
-  attachments: Array<{ id: number; url: string; uploaded_at: string }>;
+  attachments: Array<{
+    id: number;
+    url: string | null;
+    uploaded_at: string;
+    deletion_state: "active" | "deletion_pending" | "deleted" | "deletion_failed";
+    deleted_at: string | null;
+    deletion_reason: string;
+  }>;
   comments: Array<PublicComment & { is_internal: boolean }>;
   status_events: Array<{
     id: number;
@@ -228,8 +240,18 @@ export type StaffIssueDetail = StaffIssue & {
     can_change_status: boolean;
     can_comment: boolean;
     can_moderate_public_title: boolean;
+    can_manage_legal_hold: boolean;
   };
   public_title_approved_by: string | null;
+  comments_count: number;
+  status_events_count: number;
+  audit_logs_count: number;
+  comments_next_cursor: string | null;
+  status_events_next_cursor: string | null;
+  audit_logs_next_cursor: string | null;
+  legal_hold_active: boolean;
+  legal_hold_reason: string;
+  legal_hold_set_at: string | null;
 };
 
 export type StaffChoices = {

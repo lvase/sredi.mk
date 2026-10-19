@@ -103,8 +103,8 @@ export function LoginPage() {
     <section className="mx-auto max-w-md">
       <Card>
         <CardContent className="p-8">
-          <p className="eyebrow">Opštinski Inbox</p>
-          <h1 className="mt-2 text-3xl font-black">{phaseTitle(phase)}</h1>
+          <p className="font-semibold text-primary">Општински инбокс</p>
+          <h1 className="mt-2 text-3xl font-semibold">{phaseTitle(phase)}</h1>
           <p className="mt-2 text-sm text-muted-foreground">{phaseDescription(phase)}</p>
           {error ? <div className="mt-5"><ErrorState message={error} /></div> : null}
 
