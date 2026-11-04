@@ -1,5 +1,8 @@
+import uuid
+
 from django import forms
 from django.contrib.auth import get_user_model
+from django.db.models import Q
 
 from apps.issues.models import Issue, IssueAttachment, IssueComment
 
@@ -18,6 +21,7 @@ def apply_bootstrap_widgets(form):
 
 
 class CitizenIssueForm(forms.ModelForm):
+    submission_key = forms.UUIDField(required=False, initial=uuid.uuid4, widget=forms.HiddenInput)
     consent = forms.BooleanField(
         label="Се согласувам мојата пријава да биде обработена од општината.",
         required=True,
@@ -69,7 +73,7 @@ class CitizenIssueForm(forms.ModelForm):
             self.fields["settlement"].queryset = municipality.settlements.filter(is_active=True)
             self.fields["category"].queryset = self.fields["category"].queryset.filter(
                 is_active=True
-            ).filter(municipality__in=[municipality, None])
+            ).filter(Q(municipality=municipality) | Q(municipality__isnull=True))
 
     def clean_website(self):
         value = self.cleaned_data.get("website")

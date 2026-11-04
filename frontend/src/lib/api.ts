@@ -9,13 +9,21 @@ export class ApiError extends Error {
   errors: ApiErrorEnvelope;
   status: number;
   meta?: ApiErrorEnvelope["meta"];
+  retryAfterSeconds: number;
 
-  constructor(message: string, status: number, errors: ApiErrorEnvelope) {
+  constructor(message: string, status: number, errors: ApiErrorEnvelope, retryAfter: string | null = null) {
     super(message);
     this.status = status;
     this.errors = errors;
     this.meta = errors.meta;
+    this.retryAfterSeconds = errors.meta?.retry_after_seconds || parseRetryAfter(retryAfter);
   }
+}
+
+export function parseRetryAfter(value: string | null) {
+  if (!value) return 0;
+  const seconds = /^\d+$/.test(value) ? Number(value) : Math.ceil((Date.parse(value) - Date.now()) / 1000);
+  return Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
 }
 
 export function apiErrorMessage(error: unknown, fallback: string) {
@@ -52,12 +60,13 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   }
   const response = await fetch(`${API_BASE_URL}${path}`, {
     credentials: "include",
+    signal: AbortSignal.timeout(30_000),
     ...options,
     headers
   });
   const payload = (await response.json().catch(() => ({}))) as ApiEnvelope<T> | ApiErrorEnvelope;
   if (!response.ok) {
-    throw new ApiError(errorMessage(payload as ApiErrorEnvelope), response.status, payload as ApiErrorEnvelope);
+    throw new ApiError(errorMessage(payload as ApiErrorEnvelope), response.status, payload as ApiErrorEnvelope, response.headers.get("Retry-After"));
   }
   return (payload as ApiEnvelope<T>).data;
 }
@@ -79,7 +88,7 @@ async function upload<T>(path: string, body: FormData, onProgress?: (percent: nu
         catch { return {} as ApiErrorEnvelope; }
       })();
       if (xhr.status < 200 || xhr.status >= 300) {
-        reject(new ApiError(errorMessage(payload as ApiErrorEnvelope), xhr.status, payload as ApiErrorEnvelope));
+        reject(new ApiError(errorMessage(payload as ApiErrorEnvelope), xhr.status, payload as ApiErrorEnvelope, xhr.getResponseHeader("Retry-After")));
         return;
       }
       onProgress?.(100);

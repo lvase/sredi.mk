@@ -8,6 +8,8 @@ from django.http import JsonResponse
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_GET
 
+from apps.issues.operations import receipt_queue_state
+
 
 @require_GET
 @never_cache
@@ -66,4 +68,8 @@ def ready(request):
 
     if diagnostics["migrations"] != "ok" or diagnostics["redis"] != "ok":
         return JsonResponse({"status": "unavailable", "dependencies": diagnostics}, status=503)
+    try:
+        diagnostics["receipts"] = receipt_queue_state()
+    except Exception:
+        diagnostics["receipts"] = {"status": "unavailable"}
     return JsonResponse({"status": "ready", "dependencies": diagnostics})

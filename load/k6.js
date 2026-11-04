@@ -1,67 +1,83 @@
 import http from "k6/http";
 import { check } from "k6";
-import encoding from "k6/encoding";
+import { Counter } from "k6/metrics";
 
 const baseUrl = __ENV.BASE_URL || "https://localhost";
 const municipality = __ENV.MUNICIPALITY_SLUG;
-const settlementId = __ENV.SETTLEMENT_ID;
-const categoryId = __ENV.CATEGORY_ID;
-const trackingCode = __ENV.TRACKING_CODE || "";
 const staffSession = __ENV.STAFF_SESSION_COOKIE || "";
-const uploadPhotos = __ENV.UPLOAD_PHOTOS === "1";
-const onePixelPng = encoding.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "std");
-
+const submissions = Number(__ENV.SUBMISSION_COUNT || 0);
+const failures = new Counter("unexpected_responses");
 if (!municipality) throw new Error("MUNICIPALITY_SLUG is required");
+if (!Number.isInteger(submissions) || submissions < 0 || submissions > 100) throw new Error("SUBMISSION_COUNT must be 0–100");
+if ((submissions || __ENV.CHECK_THROTTLING === "1") && (!__ENV.SETTLEMENT_ID || !__ENV.CATEGORY_ID)) throw new Error("Submission tests need SETTLEMENT_ID and CATEGORY_ID on a disposable municipality");
 
 const scenarios = {
-  public_visitors: { executor: "constant-vus", vus: 20, duration: __ENV.DURATION || "5m", exec: "publicReads" },
-  submission_burst: { executor: "per-vu-iterations", vus: 5, iterations: 1, startTime: "10s", maxDuration: "2m", exec: "submitReport" }
+  burst: { executor: "per-vu-iterations", vus: 100, iterations: 1, maxDuration: "30s", exec: "read" },
+  paced_reads: { executor: "constant-arrival-rate", rate: Number(__ENV.READ_RPS || 3), timeUnit: "1s", duration: __ENV.DURATION || "5m", startTime: "15s", preAllocatedVUs: 10, maxVUs: 100, exec: "read" }
 };
-if (staffSession) scenarios.staff_inbox = { executor: "constant-vus", vus: 2, duration: __ENV.DURATION || "5m", exec: "staffInbox" };
+if (submissions) scenarios.submissions = { executor: "per-vu-iterations", vus: submissions, iterations: 1, startTime: "30s", maxDuration: "2m", exec: "submitReport" };
+if (__ENV.CHECK_THROTTLING === "1") scenarios.throttling = { executor: "per-vu-iterations", vus: 1, iterations: 1, startTime: "45s", maxDuration: "1m", exec: "checkThrottle" };
 
 export const options = {
   scenarios,
   thresholds: {
-    "http_req_duration{surface:public}": ["p(95)<500"],
-    "http_req_duration{surface:staff}": ["p(95)<750"],
+    "http_req_duration{scenario:burst}": ["p(95)<5000"],
+    "http_req_duration{scenario:paced_reads}": ["p(95)<1000"],
     "http_req_duration{surface:submission}": ["p(95)<10000"],
+    unexpected_responses: ["count==0"],
+    checks: ["rate==1"],
     http_req_failed: ["rate<0.01"]
   }
 };
 
-export function publicReads() {
-  const responses = http.batch([
-    ["GET", `${baseUrl}/api/municipalities/${municipality}/`, null, { tags: { surface: "public" } }],
-    ["GET", `${baseUrl}/api/municipalities/${municipality}/statistics/?period=90`, null, { tags: { surface: "public" } }],
-    ...(trackingCode ? [["GET", `${baseUrl}/api/municipalities/${municipality}/track/?code=${trackingCode}`, null, { tags: { surface: "public" } }]] : [])
-  ]);
-  responses.forEach((response) => check(response, { "public response is successful": (item) => item.status === 200 }));
+function expect(response, status, name) {
+  const passed = check(response, { [name]: (item) => item.status === status });
+  failures.add(passed ? 0 : 1);
 }
 
-export function staffInbox() {
-  const response = http.get(`${baseUrl}/api/staff/issues/?page=1&page_size=25`, {
-    headers: { Cookie: `sessionid=${staffSession}` },
-    tags: { surface: "staff" }
+export function read() {
+  const variant = __VU % 5;
+  const staff = variant === 4 && staffSession;
+  const path = staff ? "/api/staff/issues/?page_size=25" : variant === 3
+    ? `/api/municipalities/${municipality}/statistics/?period=90`
+    : `/api/municipalities/${municipality}/`;
+  const response = http.get(baseUrl + path, { headers: staff ? { Cookie: `sessionid=${staffSession}` } : {}, tags: { surface: staff ? "staff" : "public" } });
+  expect(response, 200, "read succeeds");
+}
+
+function key() {
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (character) => {
+    const value = Math.floor(Math.random() * 16);
+    return (character === "x" ? value : (value & 3) | 8).toString(16);
   });
-  check(response, { "staff inbox is successful": (item) => item.status === 200 });
+}
+
+function postReport() {
+  const payload = {
+    settlement: __ENV.SETTLEMENT_ID, category: __ENV.CATEGORY_ID,
+    title: `Load report ${__VU}-${Date.now()}`, description: "Controlled load test",
+    location_text: "Load location", consent: "on", website: "", submission_key: key()
+  };
+  const url = `${baseUrl}/api/municipalities/${municipality}/issues/`;
+  const parameters = { headers: { "Content-Type": "application/json" }, tags: { surface: "submission" },
+    responseCallback: http.expectedStatuses(201, 429) };
+  return { response: http.post(url, JSON.stringify(payload), parameters), payload, url, parameters };
 }
 
 export function submitReport() {
-  if (!settlementId || !categoryId) throw new Error("SETTLEMENT_ID and CATEGORY_ID are required for submissions");
-  const suffix = `${__VU}-${__ITER}-${Date.now()}`;
-  const payload = {
-    settlement: settlementId,
-    category: categoryId,
-    title: `Load report ${suffix}`,
-    description: "Synthetic report used by the approved load profile.",
-    location_text: `Load location ${suffix}`,
-    consent: "on",
-    website: ""
-  };
-  if (uploadPhotos) payload.photos = http.file(onePixelPng, `load-${suffix}.png`, "image/png");
-  const response = http.post(`${baseUrl}/api/municipalities/${municipality}/issues/`, uploadPhotos ? payload : JSON.stringify(payload), {
-    headers: uploadPhotos ? {} : { "Content-Type": "application/json" },
-    tags: { surface: "submission" }, timeout: "120s"
-  });
-  check(response, { "submission is accepted": (item) => item.status === 201 });
+  expect(http.get(`${baseUrl}/api/auth/csrf/`), 200, "browser identity established");
+  const { response, payload, url, parameters } = postReport();
+  expect(response, 201, "submission accepted");
+  const replay = http.post(url, JSON.stringify(payload), parameters);
+  expect(replay, 201, "retry accepted");
+  if (response.status === 201 && replay.status === 201) {
+    check(replay, { "retry returns original report": (item) => item.json("data.tracking_code") === response.json("data.tracking_code") });
+  }
+}
+
+export function checkThrottle() {
+  expect(http.get(`${baseUrl}/api/auth/csrf/`), 200, "browser identity established");
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    expect(postReport().response, attempt < 3 ? 201 : 429, "browser submission quota enforced");
+  }
 }

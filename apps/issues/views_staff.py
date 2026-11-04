@@ -2,7 +2,6 @@ from datetime import timedelta
 
 from django.contrib import messages
 from django.contrib.auth import get_user_model
-from django.contrib.auth.decorators import login_required
 from django.db.models import (
     BooleanField,
     Case,
@@ -20,6 +19,7 @@ from django.http import HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
 
 from apps.accounts.forms import StaffUserCreateForm
+from apps.accounts.permissions import staff_login_required
 from apps.issues.forms import IssueCommentForm, StaffIssueUpdateForm
 from apps.issues.models import (
     DEFAULT_RESOLUTION_TARGET_HOURS,
@@ -112,7 +112,7 @@ def quick_status_actions(user, issue):
     ]
 
 
-@login_required
+@staff_login_required
 def staff_dashboard(request):
     issues = staff_issue_queryset(request.user)
     municipality = request.GET.get("municipality")
@@ -220,7 +220,7 @@ def staff_dashboard(request):
     )
 
 
-@login_required
+@staff_login_required
 def staff_issue_detail(request, pk):
     issue = get_object_or_404(staff_issue_queryset(request.user), pk=pk)
     if not can_staff_access_issue(request.user, issue):
@@ -244,7 +244,7 @@ def staff_issue_detail(request, pk):
     )
 
 
-@login_required
+@staff_login_required
 def staff_change_status(request, pk):
     issue = get_object_or_404(staff_issue_queryset(request.user), pk=pk)
     if request.method != "POST":
@@ -281,7 +281,7 @@ def staff_change_status(request, pk):
     return redirect("staff_issue_detail", pk=issue.pk)
 
 
-@login_required
+@staff_login_required
 def staff_update_issue(request, pk):
     issue = get_object_or_404(staff_issue_queryset(request.user), pk=pk)
     if request.method != "POST":
@@ -327,7 +327,7 @@ def staff_update_issue(request, pk):
     return redirect("staff_issue_detail", pk=issue.pk)
 
 
-@login_required
+@staff_login_required
 def staff_add_comment(request, pk):
     issue = get_object_or_404(staff_issue_queryset(request.user), pk=pk)
     if request.method != "POST":
@@ -352,7 +352,7 @@ def staff_add_comment(request, pk):
     return redirect("staff_issue_detail", pk=issue.pk)
 
 
-@login_required
+@staff_login_required
 def staff_create_user(request):
     if not request.user.is_superuser:
         return HttpResponseForbidden("Само администратор на платформата може да креира службени корисници.")

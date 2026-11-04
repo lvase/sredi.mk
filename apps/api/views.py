@@ -2,6 +2,8 @@ import hashlib
 import json
 import logging
 import mimetypes
+import time
+import uuid
 from csv import writer
 from datetime import timedelta
 from functools import wraps
@@ -13,7 +15,7 @@ from django.contrib.auth import authenticate, get_user_model, login, logout
 from django.contrib.auth.password_validation import validate_password
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import (
     Aggregate,
     Avg,
@@ -42,10 +44,13 @@ from django_otp import login as otp_login
 from django_otp.plugins.otp_totp.models import TOTPDevice
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
+from rest_framework.exceptions import APIException
+from rest_framework.exceptions import ValidationError as APIValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
 from apps.accounts.models import RecoveryCode, TrustedDevice
+from apps.accounts.permissions import CompleteAuthentication, authentication_complete
 from apps.accounts.security import (
     TRUSTED_DEVICE_COOKIE,
     auth_attempt_state,
@@ -80,7 +85,7 @@ from apps.api.serializers import (
     TrackedIssueSerializer,
     UserSummarySerializer,
 )
-from apps.issues.delivery import queue_receipt_delivery
+from apps.api.validation import flag, identifier
 from apps.issues.forms import CitizenIssueForm, IssueCommentForm, StaffIssueUpdateForm
 from apps.issues.image_processing import (
     IssueImageValidationError,
@@ -88,13 +93,14 @@ from apps.issues.image_processing import (
     save_issue_with_attachments,
 )
 from apps.issues.models import (
+    DEFAULT_RESOLUTION_TARGET_HOURS,
     AttachmentDeletionState,
     AuditLog,
-    DEFAULT_RESOLUTION_TARGET_HOURS,
     Issue,
     IssueAttachment,
     IssueCategory,
     IssueComment,
+    IssuePriority,
     IssueStatus,
     IssueStatusEvent,
     ResponseTarget,
@@ -108,6 +114,7 @@ from apps.issues.services import (
     can_moderate_public_title,
     can_update_issue_assignment,
     consume_submission_rate_limit,
+    ensure_submission_cookie,
     get_client_ip,
     hash_client_value,
     is_issue_due_soon,
@@ -116,9 +123,11 @@ from apps.issues.services import (
     public_status_label,
     publish_resolution_note_update,
     status_requires_note,
+    submission_client,
     tracking_code_matches,
     write_audit_log,
 )
+from apps.issues.submissions import SubmissionConflict, existing_submission, submission_identity
 from apps.issues.views_staff import quick_status_actions, staff_issue_queryset
 from apps.municipalities.models import (
     Department,
@@ -309,10 +318,16 @@ def staff_filter_queryset(request):
     for query_key, field_name in filters.items():
         value = request.query_params.get(query_key)
         if value:
+            if field_name.endswith("_id"):
+                value = identifier(value, query_key)
+            elif query_key in ("status", "priority"):
+                choices = IssueStatus.values if query_key == "status" else IssuePriority.values
+                if value not in choices:
+                    raise APIValidationError({query_key: ["Невалидна вредност."]})
             issues = issues.filter(**{field_name: value})
-    if request.query_params.get("mine"):
+    if flag(request.query_params.get("mine"), "mine"):
         issues = issues.filter(assigned_to=request.user)
-    if request.query_params.get("unassigned") == "1":
+    if flag(request.query_params.get("unassigned"), "unassigned"):
         issues = issues.filter(assigned_to__isnull=True)
     search = request.query_params.get("search", "").strip()
     if search:
@@ -328,21 +343,21 @@ def staff_filter_queryset(request):
 @permission_classes([AllowAny])
 @ensure_csrf_cookie
 def csrf_view(request):
-    return ok({"csrfToken": get_token(request)})
+    return ensure_submission_cookie(request, ok({"csrfToken": get_token(request)}))
 
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def session_view(request):
-    user = request.user if request.user.is_authenticated else None
-    return ok(
+    user = request.user if authentication_complete(request.user) else None
+    return ensure_submission_cookie(request, ok(
         {
             "isAuthenticated": bool(user),
             "user": UserSummarySerializer(user).data if user else None,
             "csrfToken": get_token(request),
             "pendingAuthentication": bool(pending_user(request)),
         }
-    )
+    ))
 
 
 @api_view(["POST"])
@@ -401,7 +416,7 @@ def logout_view(request):
 
 def _auth_user_for_security_flow(request):
     if request.user.is_authenticated:
-        return request.user
+        return request.user if authentication_complete(request.user) else None
     return pending_user(request)
 
 
@@ -433,7 +448,7 @@ def _complete_authentication(request, user, remember_device=False):
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([CompleteAuthentication])
 def security_status(request):
     active_devices = TrustedDevice.objects.filter(
         user=request.user,
@@ -586,7 +601,7 @@ def change_password(request):
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([CompleteAuthentication])
 def disable_two_factor(request):
     if request.user.is_superuser:
         return fail(
@@ -611,7 +626,7 @@ def disable_two_factor(request):
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([CompleteAuthentication])
 def regenerate_recovery_codes(request):
     if not verify_second_factor(request.user, request.data.get("token", "")):
         return fail({"token": ["Кодот не е валиден."]})
@@ -628,7 +643,7 @@ def regenerate_recovery_codes(request):
 
 
 @api_view(["DELETE"])
-@permission_classes([IsAuthenticated])
+@permission_classes([CompleteAuthentication])
 def revoke_trusted_device(request, pk):
     device = get_object_or_404(TrustedDevice, pk=pk, user=request.user)
     device.revoked_at = timezone.now()
@@ -637,7 +652,7 @@ def revoke_trusted_device(request, pk):
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([CompleteAuthentication])
 def reset_staff_two_factor(request, user_id):
     if not request.user.is_superuser:
         return fail({"detail": "Немате дозвола за оваа операција."}, status.HTTP_403_FORBIDDEN)
@@ -698,7 +713,7 @@ def municipality_crest(request, municipality_slug):
 def form_options(request, municipality_slug):
     municipality = get_municipality_or_404(municipality_slug)
     categories = IssueCategory.objects.filter(is_active=True).filter(
-        municipality__in=[municipality, None]
+        Q(municipality=municipality) | Q(municipality__isnull=True)
     )
     return ok(
         {
@@ -716,13 +731,21 @@ def form_options(request, municipality_slug):
 @require_shared_throttle
 def submit_issue(request, municipality_slug):
     municipality = get_municipality_or_404(municipality_slug)
-    form = CitizenIssueForm(request.data, request.FILES, municipality=municipality)
     files = request.FILES.getlist("photos")
-    form_is_valid = form.is_valid()
-    if not form_is_valid:
+    try:
+        submission_key, submission_digest = submission_identity(request, request.data, files)
+        existing = existing_submission(municipality, submission_key, submission_digest)
+    except SubmissionConflict as exc:
+        return fail({"detail": str(exc)}, status.HTTP_409_CONFLICT)
+    except ValueError as exc:
+        return fail({"submission_key": [str(exc)]})
+    if existing:
+        return created_issue_response(existing)
+    form = CitizenIssueForm(request.data, request.FILES, municipality=municipality)
+    if not form.is_valid():
         return fail(dict(form.errors))
     ip_hash = hash_client_value(get_client_ip(request))
-    allowed, rate_state = consume_submission_rate_limit(municipality, ip_hash)
+    allowed, rate_state = consume_submission_rate_limit(municipality, ip_hash, submission_client(request))
     if not allowed:
         response = Response(
             {
@@ -755,19 +778,26 @@ def submit_issue(request, municipality_slug):
         description=issue.description,
         location_text=issue.location_text,
     )
-    save_issue_with_attachments(issue, processed_images)
-
-    receipt_delivery = "not_requested"
-    if form.cleaned_data.get("send_receipt"):
+    issue.submission_key = submission_key
+    issue.submission_digest = submission_digest
+    try:
+        save_issue_with_attachments(issue, processed_images, send_receipt=form.cleaned_data.get("send_receipt", False))
+    except IntegrityError:
+        # The uniqueness constraint serializes simultaneous retries across workers.
         try:
-            queue_receipt_delivery(issue)
-        except Exception:
-            security_logger.exception(
-                "receipt_delivery_record_failed", extra={"issue_id": issue.pk}
-            )
-            receipt_delivery = "failed"
-        else:
-            receipt_delivery = "queued"
+            existing = existing_submission(municipality, submission_key, submission_digest)
+        except SubmissionConflict as exc:
+            return fail({"detail": str(exc)}, status.HTTP_409_CONFLICT)
+        if existing:
+            return created_issue_response(existing)
+        raise
+    return created_issue_response(issue)
+
+
+def created_issue_response(issue):
+    delivery = issue.receipt_deliveries.order_by("pk").first()
+    receipt_delivery = delivery.state if delivery else "not_requested"
+
     return ok(
         {
             "id": issue.pk,
@@ -928,7 +958,7 @@ def _legacy_build_public_statistics(request, municipality):
             ).data,
             "categories": IssueCategorySerializer(
                 IssueCategory.objects.filter(is_active=True).filter(
-                    municipality__in=[municipality, None]
+                    Q(municipality=municipality) | Q(municipality__isnull=True)
                 ),
                 many=True,
             ).data,
@@ -989,14 +1019,11 @@ def _statistics_filters(request):
     public_status = request.query_params.get("status", "")
     if public_status not in PUBLIC_STATUS_GROUPS:
         public_status = ""
-    def identifier(name):
-        value = request.query_params.get(name, "")
-        return int(value) if value.isdigit() and int(value) > 0 else ""
 
     return {
         "period": period,
-        "settlement": identifier("settlement"),
-        "category": identifier("category"),
+        "settlement": identifier(request.query_params.get("settlement"), "settlement") or "",
+        "category": identifier(request.query_params.get("category"), "category") or "",
         "status": public_status,
     }
 
@@ -1137,7 +1164,7 @@ def _compute_public_statistics(request, municipality, filters):
             ).data,
             "categories": IssueCategorySerializer(
                 IssueCategory.objects.filter(is_active=True).filter(
-                    municipality__in=[municipality, None]
+                    Q(municipality=municipality) | Q(municipality__isnull=True)
                 ),
                 many=True,
             ).data,
@@ -1184,35 +1211,55 @@ def _compute_public_statistics(request, municipality, filters):
     }
 
 
+class StatisticsBusy(APIException):
+    status_code = 503
+    default_detail = "Статистиката се обновува. Обидете се повторно за момент."
+    wait = 1
+
+
 def build_public_statistics(request, municipality):
     filters = _statistics_filters(request)
-    digest = hashlib.sha256(
-        json.dumps(filters, sort_keys=True).encode("utf-8")
-    ).hexdigest()[:20]
+    digest = hashlib.sha256(json.dumps(filters, sort_keys=True).encode()).hexdigest()[:20]
     cache_key = f"statistics:{municipality.pk}:{municipality.statistics_version}:{digest}"
-    stale_key = f"statistics:stale:{municipality.pk}:{digest}"
-    lock_key = f"statistics:lock:{municipality.pk}:{digest}"
+    # Never serve results from before moderation changed the version.
+    stale_key = f"{cache_key}:stale"
+    lock_key = f"{cache_key}:lock"
+    token = uuid.uuid4().hex
     lock_acquired = False
+    cache_available = True
     try:
         cached = cache.get(cache_key)
         if cached is not None:
             return cached
-        lock_acquired = cache.add(lock_key, True, timeout=15)
+        lock_acquired = cache.add(lock_key, token, timeout=60)
         if not lock_acquired:
             stale = cache.get(stale_key)
             if stale is not None:
                 return stale
+            for _ in range(25):
+                time.sleep(0.02)
+                cached = cache.get(cache_key)
+                if cached is not None:
+                    return cached
     except Exception:
-        lock_acquired = False
-    payload = _compute_public_statistics(request, municipality, filters)
+        cache_available = False
+    if cache_available and not lock_acquired:
+        raise StatisticsBusy()
     try:
-        cache.set(cache_key, payload, timeout=5 * 60)
-        cache.set(stale_key, payload, timeout=15 * 60)
+        payload = _compute_public_statistics(request, municipality, filters)
+        try:
+            cache.set(cache_key, payload, timeout=300)
+            cache.set(stale_key, payload, timeout=900)
+        except Exception:
+            pass
+        return payload
+    finally:
         if lock_acquired:
-            cache.delete(lock_key)
-    except Exception:
-        pass
-    return payload
+            try:
+                if cache.get(lock_key) == token:
+                    cache.delete(lock_key)
+            except Exception:
+                pass
 
 
 @api_view(["GET"])
@@ -1286,7 +1333,7 @@ def track_issue(request, municipality_slug):
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([CompleteAuthentication])
 def staff_choices(request):
     profile = getattr(request.user, "staffprofile", None)
     try:
@@ -1356,20 +1403,20 @@ def staff_choices(request):
     )
     if choices_cache_key:
         try:
-            cache.set(choices_cache_key, choices, timeout=5 * 60)
+            cache.set(choices_cache_key, choices, timeout=30)
         except Exception:
             pass
     return ok(choices)
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([CompleteAuthentication])
 def staff_issues(request):
     issues = staff_filter_queryset(request)
     base = staff_issue_queryset(request.user)
-    if request.query_params.get("overdue") == "1":
+    if flag(request.query_params.get("overdue"), "overdue"):
         issues = issues.filter(target_overdue=True)
-    if request.query_params.get("due_soon") == "1":
+    if flag(request.query_params.get("due_soon"), "due_soon"):
         issues = issues.filter(target_due_soon=True)
 
     allowed_sorting = {
@@ -1405,15 +1452,27 @@ def staff_issues(request):
         IssueStatus.REJECTED_SPAM,
         IssueStatus.NOT_JURISDICTION,
     ]
-    metrics = base.aggregate(
-        total=Count("id"),
-        pending=Count("id", filter=Q(status=IssueStatus.PENDING_TRIAGE)),
-        open=Count("id", filter=~Q(status__in=terminal_statuses)),
-        my=Count("id", filter=Q(assigned_to=request.user)),
-        unassigned=Count("id", filter=Q(assigned_to__isnull=True)),
-        overdue=Count("id", filter=Q(target_overdue=True)),
-        due_soon=Count("id", filter=Q(target_due_soon=True)),
-    )
+    profile = getattr(request.user, "staffprofile", None)
+    metrics_key = f"staff-metrics:{request.user.pk}:{getattr(profile, 'municipality_id', 0)}:{int(request.user.is_superuser)}"
+    try:
+        metrics = cache.get(metrics_key)
+    except Exception:
+        metrics = None
+    if metrics is None:
+        metrics = base.aggregate(
+            total=Count("id"),
+            pending=Count("id", filter=Q(status=IssueStatus.PENDING_TRIAGE)),
+            open=Count("id", filter=~Q(status__in=terminal_statuses)),
+            my=Count("id", filter=Q(assigned_to=request.user)),
+            unassigned=Count("id", filter=Q(assigned_to__isnull=True)),
+            overdue=Count("id", filter=Q(target_overdue=True)),
+            due_soon=Count("id", filter=Q(target_due_soon=True)),
+        )
+        try:
+            cache.set(metrics_key, metrics, timeout=15)
+        except Exception:
+            pass
+
     return ok(
         {
             "metrics": metrics,
@@ -1431,7 +1490,7 @@ def staff_issues(request):
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([CompleteAuthentication])
 @transaction.atomic
 def staff_bulk_assign(request):
     raw_items = request.data.get("issues")
@@ -1531,7 +1590,7 @@ def staff_bulk_assign(request):
 
 
 @api_view(["GET", "PATCH"])
-@permission_classes([IsAuthenticated])
+@permission_classes([CompleteAuthentication])
 @transaction.atomic
 def staff_issue_detail(request, pk):
     if request.method == "PATCH":
@@ -1585,7 +1644,7 @@ def staff_issue_detail(request, pk):
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([CompleteAuthentication])
 @transaction.atomic
 def approve_public_title(request, pk):
     issue = get_object_or_404(
@@ -1628,7 +1687,7 @@ def approve_public_title(request, pk):
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([CompleteAuthentication])
 @transaction.atomic
 def revoke_public_title(request, pk):
     issue = get_object_or_404(
@@ -1662,7 +1721,7 @@ def revoke_public_title(request, pk):
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([CompleteAuthentication])
 @transaction.atomic
 def staff_issue_status(request, pk):
     issue = get_object_or_404(
@@ -1705,7 +1764,7 @@ def staff_issue_status(request, pk):
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([CompleteAuthentication])
 def staff_issue_comments(request, pk):
     issue = get_object_or_404(staff_issue_queryset(request.user), pk=pk)
     if not can_add_issue_comment(request.user, issue):
@@ -1747,7 +1806,7 @@ def _history_page(request, queryset, serializer_class):
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([CompleteAuthentication])
 def staff_issue_comment_history(request, pk):
     issue = get_object_or_404(staff_issue_queryset(request.user), pk=pk)
     queryset = IssueComment.objects.filter(issue=issue).select_related("author")
@@ -1760,7 +1819,7 @@ def staff_issue_comment_history(request, pk):
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([CompleteAuthentication])
 def staff_issue_status_history(request, pk):
     issue = get_object_or_404(staff_issue_queryset(request.user), pk=pk)
     queryset = IssueStatusEvent.objects.filter(issue=issue).select_related("changed_by")
@@ -1773,7 +1832,7 @@ def staff_issue_status_history(request, pk):
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([CompleteAuthentication])
 def staff_issue_audit_history(request, pk):
     issue = get_object_or_404(staff_issue_queryset(request.user), pk=pk)
     queryset = AuditLog.objects.filter(
@@ -1788,7 +1847,7 @@ def staff_issue_audit_history(request, pk):
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([CompleteAuthentication])
 @transaction.atomic
 def staff_issue_legal_hold(request, pk):
     issue = get_object_or_404(
@@ -1835,7 +1894,7 @@ def staff_issue_legal_hold(request, pk):
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([CompleteAuthentication])
 def staff_attachment(request, pk):
     attachment = get_object_or_404(
         IssueAttachment.objects.select_related("issue"),
@@ -1860,7 +1919,7 @@ def staff_attachment(request, pk):
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([CompleteAuthentication])
 def staff_users(request):
     if not request.user.is_superuser:
         return fail(

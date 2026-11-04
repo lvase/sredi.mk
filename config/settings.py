@@ -2,7 +2,8 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 import environ
-from django.core.exceptions import ImproperlyConfigured
+from django.core.exceptions import ImproperlyConfigured, ValidationError
+from django.core.validators import DomainNameValidator
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -20,6 +21,7 @@ SECRET_KEY = env("DJANGO_SECRET_KEY", default="dev-only-change-me")
 DEBUG = env("DJANGO_DEBUG", default=False)
 E2E_TEST_MODE = env("E2E_TEST_MODE", default=False)
 PRODUCTION = env("DJANGO_PRODUCTION", default=False)
+DOMAIN = env("DOMAIN", default="")
 ALLOWED_HOSTS = env.list("DJANGO_ALLOWED_HOSTS", default=["localhost", "127.0.0.1"])
 FRONTEND_DEV_ORIGINS = env.list(
     "FRONTEND_DEV_ORIGINS",
@@ -28,6 +30,7 @@ FRONTEND_DEV_ORIGINS = env.list(
 
 INSTALLED_APPS = [
     "corsheaders",
+    "django.contrib.postgres",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -135,6 +138,8 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
 DATA_UPLOAD_MAX_MEMORY_SIZE = env.int("DATA_UPLOAD_MAX_MEMORY_SIZE", default=28 * 1024 * 1024)
 ISSUE_RATE_LIMIT_HOURLY = env.int("ISSUE_RATE_LIMIT_HOURLY", default=3)
 ISSUE_RATE_LIMIT_DAILY = env.int("ISSUE_RATE_LIMIT_DAILY", default=10)
+ISSUE_NETWORK_RATE_LIMIT_HOURLY = env.int("ISSUE_NETWORK_RATE_LIMIT_HOURLY", default=100)
+ISSUE_NETWORK_RATE_LIMIT_DAILY = env.int("ISSUE_NETWORK_RATE_LIMIT_DAILY", default=500)
 TRUSTED_PROXY_IPS = env.list("TRUSTED_PROXY_IPS", default=[])
 MAX_ISSUE_PHOTOS = env.int("MAX_ISSUE_PHOTOS", default=5)
 MAX_ISSUE_IMAGE_SIZE_BYTES = env.int("MAX_ISSUE_IMAGE_SIZE_BYTES", default=5 * 1024 * 1024)
@@ -147,6 +152,7 @@ ISSUE_IMAGE_MAX_OUTPUT_SIZE_BYTES = env.int(
 ISSUE_TEXT_BODY_LIMIT_BYTES = env.int("ISSUE_TEXT_BODY_LIMIT_BYTES", default=1024 * 1024)
 
 REDIS_URL = env("REDIS_URL", default="")
+REDIS_SOCKET_TIMEOUT = env.float("REDIS_SOCKET_TIMEOUT", default=2)
 RATE_LIMIT_CACHE_ALIAS = "rate_limits"
 if REDIS_URL:
     redis_parts = urlsplit(REDIS_URL)
@@ -158,13 +164,13 @@ if REDIS_URL:
         "default": {
             "BACKEND": "django_redis.cache.RedisCache",
             "LOCATION": redis_database_url(1),
-            "OPTIONS": {"CLIENT_CLASS": "django_redis.client.DefaultClient"},
+            "OPTIONS": {"CLIENT_CLASS": "django_redis.client.DefaultClient", "SOCKET_CONNECT_TIMEOUT": REDIS_SOCKET_TIMEOUT, "SOCKET_TIMEOUT": REDIS_SOCKET_TIMEOUT},
             "TIMEOUT": 300,
         },
         "rate_limits": {
             "BACKEND": "django_redis.cache.RedisCache",
             "LOCATION": redis_database_url(2),
-            "OPTIONS": {"CLIENT_CLASS": "django_redis.client.DefaultClient"},
+            "OPTIONS": {"CLIENT_CLASS": "django_redis.client.DefaultClient", "SOCKET_CONNECT_TIMEOUT": REDIS_SOCKET_TIMEOUT, "SOCKET_TIMEOUT": REDIS_SOCKET_TIMEOUT},
             "TIMEOUT": 900,
         },
     }
@@ -182,6 +188,10 @@ CELERY_RESULT_BACKEND = env("CELERY_RESULT_BACKEND", default=REDIS_URL or "cache
 CELERY_TASK_ACKS_LATE = True
 CELERY_TASK_REJECT_ON_WORKER_LOST = True
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+CELERY_BROKER_TRANSPORT_OPTIONS = {"socket_connect_timeout": 2, "socket_timeout": 2, "retry_on_timeout": False}
+CELERY_TASK_PUBLISH_RETRY = False
+CELERY_REDIS_SOCKET_CONNECT_TIMEOUT = 2
+CELERY_REDIS_SOCKET_TIMEOUT = 2
 CELERY_TASK_TIME_LIMIT = env.int("CELERY_TASK_TIME_LIMIT", default=300)
 CELERY_WORKER_MAX_TASKS_PER_CHILD = env.int("CELERY_WORKER_MAX_TASKS_PER_CHILD", default=100)
 CELERY_RESULT_EXPIRES = env.int("CELERY_RESULT_EXPIRES", default=3600)
@@ -192,6 +202,12 @@ STORAGE_MONITOR_ENABLED = env.bool("STORAGE_MONITOR_ENABLED", default=PRODUCTION
 OPERATIONS_ALERT_EMAILS = env.list("OPERATIONS_ALERT_EMAILS", default=[])
 MEDIA_MAINTENANCE_LOCK_ID = env.int("MEDIA_MAINTENANCE_LOCK_ID", default=734733)
 CELERY_BEAT_SCHEDULE = {
+    "receipt-queue-monitor": {
+        "task": "apps.issues.tasks.monitor_delivery_queue", "schedule": 300,
+    },
+    "receipt-outbox-minute": {
+        "task": "apps.issues.tasks.dispatch_receipt_deliveries", "schedule": 60,
+    },
     "attachment-retention-daily": {
         "task": "apps.issues.tasks.run_attachment_retention",
         "schedule": 24 * 60 * 60,
@@ -225,6 +241,15 @@ CSRF_COOKIE_SAMESITE = "Lax"
 
 if PRODUCTION:
     production_errors = []
+    try:
+        DomainNameValidator(accept_idna=False)(DOMAIN)
+    except ValidationError:
+        production_errors.append("DOMAIN must be a DNS hostname without a scheme, port, or path")
+    else:
+        if DOMAIN not in ALLOWED_HOSTS:
+            production_errors.append("DOMAIN must appear explicitly in DJANGO_ALLOWED_HOSTS")
+        if f"https://{DOMAIN}" not in CSRF_TRUSTED_ORIGINS:
+            production_errors.append("CSRF_TRUSTED_ORIGINS must include https://DOMAIN")
     if DEBUG:
         production_errors.append("DJANGO_DEBUG must be false")
     if SECRET_KEY == "dev-only-change-me" or len(SECRET_KEY) < 40:

@@ -28,14 +28,12 @@ def _increment_statistics_version(municipality_id):
 
 @receiver(post_save, sender=Issue)
 def issue_saved(sender, instance, **kwargs):
-    transaction.on_commit(lambda: _increment_statistics_version(instance.municipality_id))
-    transaction.on_commit(_bump_choices_version)
+    transaction.on_commit(lambda: _increment_statistics_version(instance.municipality_id), robust=True)
 
 
 @receiver(post_delete, sender=Issue)
 def issue_deleted(sender, instance, **kwargs):
-    transaction.on_commit(lambda: _increment_statistics_version(instance.municipality_id))
-    transaction.on_commit(_bump_choices_version)
+    transaction.on_commit(lambda: _increment_statistics_version(instance.municipality_id), robust=True)
 
 
 @receiver(post_save, sender=StaffProfile)

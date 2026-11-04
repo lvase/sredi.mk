@@ -8,7 +8,7 @@ from datetime import timedelta
 
 import qrcode
 from django.conf import settings
-from django.contrib.auth import get_user_model
+from django.contrib.auth import get_user_model, logout
 from django.db import transaction
 from django.utils import timezone
 from django.utils.crypto import constant_time_compare
@@ -200,6 +200,9 @@ def clear_pending_auth(request):
 
 
 def set_pending_auth(request, user):
+    # Reauthentication must replace any old (possibly incomplete) login session.
+    if request.user.is_authenticated:
+        logout(request)
     request.session.cycle_key()
     request.session[PENDING_USER_SESSION_KEY] = user.pk
 

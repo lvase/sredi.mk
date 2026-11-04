@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Check, CheckCircle2, Clipboard, Printer, Send, TriangleAlert, Upload, X } from "lucide-react";
 import { api, ApiError, ensureCsrf, isNotFoundError } from "../lib/api";
+import { clearSubmission, savedReceipt, saveReceipt, submissionKey, type CreatedIssue } from "../lib/submissionStorage";
 import type { FormOptions } from "../lib/types";
 import { Button } from "../components/ui/button";
 import { Card, CardContent } from "../components/ui/card";
@@ -15,7 +16,7 @@ import { ErrorState } from "../components/ErrorState";
 import { SectionHeading } from "../components/shared";
 import { NotFoundPage } from "./NotFoundPage";
 
-type CreatedIssue = { id: number; tracking_code: string; status: string; status_label: string; receipt_delivery: "queued" | "sent" | "failed" | "not_requested" };
+
 type PhotoPreview = { file: File; url: string; originalName: string };
 type FieldErrors = Record<string, string[]>;
 type Draft = { settlement?: string; category?: string; location_text?: string; title?: string; description?: string };
@@ -27,9 +28,14 @@ const FIELD_LABELS: Record<string, string> = { settlement: "Населено м�
 
 export function ReportPage() {
   const { municipalitySlug = "" } = useParams();
+  return <ReportForm key={municipalitySlug} municipalitySlug={municipalitySlug} />;
+}
+
+function ReportForm({ municipalitySlug }: { municipalitySlug: string }) {
+  const [retryKey, setRetryKey] = useState(() => submissionKey(municipalitySlug));
   const draftKey = `sredi:draft:${municipalitySlug}`;
   const draft = useMemo<Draft>(() => { try { return JSON.parse(sessionStorage.getItem(draftKey) || "{}"); } catch { return {}; } }, [draftKey]);
-  const [createdIssue, setCreatedIssue] = useState<CreatedIssue | null>(null);
+  const [createdIssue, setCreatedIssue] = useState<CreatedIssue | null>(() => savedReceipt(municipalitySlug));
   const [error, setError] = useState("");
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [cooldownSeconds, setCooldownSeconds] = useState(0);
@@ -43,14 +49,15 @@ export function ReportPage() {
   const photosEnabled = options.data?.municipality.photo_uploads_enabled === true;
   const submit = useMutation({
     mutationFn: async (formData: FormData) => {
+      formData.set("submission_key", retryKey);
       await ensureCsrf();
       const path = `/municipalities/${municipalitySlug}/issues/`;
       return photosEnabled
         ? api.upload<CreatedIssue>(path, formData, setUploadProgress)
         : api.post<CreatedIssue>(path, Object.fromEntries(formData));
     },
-    onSuccess: (data) => { photosRef.current.forEach((photo) => URL.revokeObjectURL(photo.url)); photosRef.current = []; setPhotos([]); setError(""); setFieldErrors({}); setCreatedIssue(data); sessionStorage.removeItem(draftKey); window.scrollTo({ top: 0, behavior: "smooth" }); },
-    onError: (err) => { setUploadProgress(0); if (err instanceof ApiError) { const nextErrors = normalizeFieldErrors(err.errors.errors); setFieldErrors(nextErrors); setCooldownSeconds(err.meta?.retry_after_seconds || 0); setError(Object.keys(nextErrors).length ? "" : err.message); } else setError("Пријавата не е испратена."); }
+    onSuccess: (data) => { photosRef.current.forEach((photo) => URL.revokeObjectURL(photo.url)); photosRef.current = []; setPhotos([]); setError(""); setFieldErrors({}); setCreatedIssue(data); saveReceipt(municipalitySlug, data); try { sessionStorage.removeItem(draftKey); } catch { /* storage may be unavailable */ } window.scrollTo({ top: 0, behavior: "smooth" }); },
+    onError: (err) => { setUploadProgress(0); if (err instanceof ApiError) { const nextErrors = normalizeFieldErrors(err.errors.errors); setFieldErrors(nextErrors); setCooldownSeconds(err.retryAfterSeconds); setError(Object.keys(nextErrors).length ? "" : err.message); } else setError("Не добивме потврда. Обиди се повторно со истите податоци; повторното испраќање нема да создаде втора пријава."); }
   });
 
   useEffect(() => { photosRef.current = photos; }, [photos]);
@@ -58,17 +65,19 @@ export function ReportPage() {
   useEffect(() => { if (Object.values(fieldErrors).some((messages) => messages.length > 0)) summaryRef.current?.focus(); }, [fieldErrors]);
   useEffect(() => { if (cooldownSeconds <= 0) return; const timer = window.setInterval(() => setCooldownSeconds((current) => Math.max(0, current - 1)), 1000); return () => window.clearInterval(timer); }, [cooldownSeconds]);
 
+  function startNewReport() { clearSubmission(municipalitySlug); setRetryKey(submissionKey(municipalitySlug)); setCreatedIssue(null); setError(""); setFieldErrors({}); submit.reset(); }
+
+  if (createdIssue) return <Receipt onNew={startNewReport} issue={createdIssue} municipalitySlug={municipalitySlug} copied={copied} onCopy={async () => { await navigator.clipboard.writeText(createdIssue.tracking_code); setCopied(true); window.setTimeout(() => setCopied(false), 2500); }} />;
+
   if (options.isLoading) return <LoadingState />;
   if (isNotFoundError(options.error)) return <NotFoundPage />;
   if (options.isError || !options.data) return <ErrorState message="Не може да се вчита формата." />;
-
-  if (createdIssue) return <Receipt issue={createdIssue} municipalitySlug={municipalitySlug} copied={copied} onCopy={async () => { await navigator.clipboard.writeText(createdIssue.tracking_code); setCopied(true); window.setTimeout(() => setCopied(false), 2500); }} />;
 
   function persistDraft(form: HTMLFormElement) {
     const data = new FormData(form);
     const safeDraft: Draft = {};
     (["settlement", "category", "location_text", "title", "description"] as const).forEach((key) => { safeDraft[key] = String(data.get(key) || ""); });
-    sessionStorage.setItem(draftKey, JSON.stringify(safeDraft));
+    try { sessionStorage.setItem(draftKey, JSON.stringify(safeDraft)); } catch { /* storage may be unavailable */ }
   }
 
   function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -122,6 +131,7 @@ export function ReportPage() {
   return (
     <section className="mx-auto max-w-[760px]">
       <div className="mb-10 border-b pb-8"><p className="eyebrow">{options.data.municipality.name}</p><h1 className="mt-3 text-3xl font-semibold tracking-tight sm:text-4xl">Пријави локален проблем</h1><p className="mt-4 max-w-2xl text-lg leading-7 text-muted-foreground">Полињата со ѕвездичка се задолжителни. {photosEnabled ? "Контактот и фотографиите се по избор." : "Контактот е по избор."}</p></div>
+      {submit.error instanceof ApiError && submit.error.status === 409 ? <Button type="button" variant="outline" onClick={startNewReport}>Започни нова пријава</Button> : null}
       <form className="report-form space-y-6" onSubmit={handleSubmit} onInput={(event) => persistDraft(event.currentTarget)} onChange={(event) => persistDraft(event.currentTarget)} noValidate>
         <input type="hidden" name="website" value="" />
         {Object.values(fieldErrors).some((messages) => messages.length > 0) ? <div ref={summaryRef} tabIndex={-1} role="alert" aria-labelledby="error-summary-title" className="rounded-md border border-red-300 bg-red-50 p-5"><h2 id="error-summary-title" className="font-semibold text-red-900">Провери ги означените полиња</h2><ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-red-800">{Object.entries(fieldErrors).flatMap(([field, messages]) => messages.map((message) => <li key={`${field}-${message}`}><a className="underline" href={`#${field}`}>{FIELD_LABELS[field] || field}: {message}</a></li>))}</ul></div> : null}
@@ -138,7 +148,7 @@ export function ReportPage() {
   );
 }
 
-function Receipt({ issue, municipalitySlug, copied, onCopy }: { issue: CreatedIssue; municipalitySlug: string; copied: boolean; onCopy: () => void }) {
+function Receipt({ issue, municipalitySlug, copied, onCopy, onNew }: { onNew: () => void; issue: CreatedIssue; municipalitySlug: string; copied: boolean; onCopy: () => void }) {
   return (
     <section className="print-receipt mx-auto max-w-2xl">
       <Card><CardContent className="p-8 text-center">
@@ -153,6 +163,8 @@ function Receipt({ issue, municipalitySlug, copied, onCopy }: { issue: CreatedIs
         {issue.receipt_delivery === "queued" ? <p className="mb-5 text-sm text-emerald-700">Потврдата е ставена во редица за испраќање по е-пошта.</p> : null}
         {issue.receipt_delivery === "sent" ? <p className="mb-5 text-sm text-emerald-700">Потврдата е испратена по е-пошта.</p> : null}
         {issue.receipt_delivery === "failed" ? <p className="mb-5 text-sm text-amber-800">Пријавата е успешна, но е-поштата не можеше да се стави во редица. Зачувај го кодот од екранот.</p> : null}
+        <p className="mb-4 text-xs text-muted-foreground">Потврдата се чува во ова јазиче до неговото затворање.</p>
+        <Button className="no-print mb-4" variant="outline" onClick={onNew}>Започни нова пријава</Button>
         <div className="no-print flex flex-col justify-center gap-3 sm:flex-row"><Button asChild size="lg"><Link to={`/${municipalitySlug}/sledi?code=${issue.tracking_code}`}>Провери статус</Link></Button><Button variant="outline" size="lg" onClick={() => window.print()}><Printer className="h-5 w-5" /> Печати / зачувај потврда</Button></div>
       </CardContent></Card>
     </section>

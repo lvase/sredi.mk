@@ -217,10 +217,18 @@ def prepare_issue_images(files):
     return processed
 
 
-def save_issue_with_attachments(issue, processed_images):
+def save_issue_with_attachments(issue, processed_images, *, send_receipt=False):
     written_files = []
+    committed = False
+
+    def mark_committed():
+        nonlocal committed
+        committed = True
+
     try:
         with transaction.atomic():
+            # Mark success before Issue's callbacks; their failure must not delete committed files.
+            transaction.on_commit(mark_committed)
             issue.save()
             for processed in processed_images:
                 attachment = IssueAttachment(
@@ -255,8 +263,12 @@ def save_issue_with_attachments(issue, processed_images):
                         "processing_version": processed.processing_version,
                     },
                 )
+            if send_receipt:
+                from apps.issues.delivery import queue_receipt_delivery
+
+                queue_receipt_delivery(issue)
     except Exception:
-        for storage, name in written_files:
+        for storage, name in written_files if not committed else []:
             try:
                 storage.delete(name)
             except Exception:

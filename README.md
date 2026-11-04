@@ -51,15 +51,17 @@ The default `frontend` command starts Vite on port `5173`.
 - Django host port: `8004`
 - React host port: `5173`
 - PostgreSQL host port: `5444`
-- Redis: not used in the first MVP
+- Redis: production cache, shared rate limits, and Celery task broker
 
 ## Rate limiting behind a proxy
 
-Public submission limits are enforced atomically per municipality and hashed client IP. The app ignores `X-Forwarded-For` unless the immediate proxy is listed in `TRUSTED_PROXY_IPS` as an IP or CIDR range. In production, only list proxies that replace or safely append that header.
+Public submission limits are enforced atomically per signed anonymous browser identity, with a separate municipality/IP ceiling for shared networks. Clients without the browser cookie fall back to the stricter IP quota. The app ignores `X-Forwarded-For` unless the immediate proxy is listed in `TRUSTED_PROXY_IPS` as an IP or CIDR range. In production, only list proxies that replace or safely append that header.
 
 ```env
 ISSUE_RATE_LIMIT_HOURLY=3
 ISSUE_RATE_LIMIT_DAILY=10
+ISSUE_NETWORK_RATE_LIMIT_HOURLY=100
+ISSUE_NETWORK_RATE_LIMIT_DAILY=500
 TRUSTED_PROXY_IPS=10.0.0.0/8,192.0.2.10
 ```
 
