@@ -421,6 +421,8 @@ def _auth_user_for_security_flow(request):
 
 
 def _complete_authentication(request, user, remember_device=False):
+    if ensure_staff_profile(user).must_change_password:
+        return fail({"detail": "Прво сменете ја привремената лозинка."}, status.HTTP_403_FORBIDDEN)
     clear_pending_auth(request)
     login(request, user, backend="django.contrib.auth.backends.ModelBackend")
     device = confirmed_totp_device(user)
@@ -482,6 +484,10 @@ def totp_setup(request):
     user = _auth_user_for_security_flow(request)
     if not user:
         return fail({"detail": "Потребна е повторна најава."}, status.HTTP_401_UNAUTHORIZED)
+    if ensure_staff_profile(user).must_change_password or (
+        not request.user.is_authenticated and confirmed_totp_device(user)
+    ):
+        return fail({"detail": "Прво завршете ја тековната најава."}, status.HTTP_403_FORBIDDEN)
     device = begin_totp_enrollment(user)
     return ok(enrollment_payload(device))
 
@@ -495,6 +501,10 @@ def totp_confirm(request):
     user = _auth_user_for_security_flow(request)
     if not user:
         return fail({"detail": "Потребна е повторна најава."}, status.HTTP_401_UNAUTHORIZED)
+    if ensure_staff_profile(user).must_change_password or (
+        not request.user.is_authenticated and confirmed_totp_device(user)
+    ):
+        return fail({"detail": "Прво завршете ја тековната најава."}, status.HTTP_403_FORBIDDEN)
     token = str(request.data.get("token", "")).strip()
     ip_address = get_client_ip(request)
     attempt = auth_attempt_state(user.get_username(), ip_address)
@@ -547,6 +557,8 @@ def verify_two_factor(request):
     user = pending_user(request)
     if not user:
         return fail({"detail": "Потребна е повторна најава."}, status.HTTP_401_UNAUTHORIZED)
+    if ensure_staff_profile(user).must_change_password:
+        return fail({"detail": "Прво сменете ја привремената лозинка."}, status.HTTP_403_FORBIDDEN)
     ip_address = get_client_ip(request)
     attempt = auth_attempt_state(user.get_username(), ip_address)
     if not attempt.allowed:

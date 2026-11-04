@@ -108,6 +108,39 @@ def test_existing_incomplete_session_can_restart_second_factor(client):
     assert client.session["_auth_user_id"] == str(user.pk)
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize("superuser", [False, True])
+def test_pending_second_factor_cannot_replace_existing_authenticator(client, superuser):
+    from apps.accounts.tests import current_token
+
+    user = get_user_model().objects.create_user(username="enrollment-bypass", password="test-password", is_superuser=superuser)
+    original = TOTPDevice.objects.create(user=user, confirmed=True)
+    incomplete = TOTPDevice.objects.create(user=user, confirmed=False)
+    response = client.post("/api/auth/login/", {"username": user.username, "password": "test-password"})
+    assert response.json()["data"]["next_step"] == "verify_2fa"
+    assert client.post("/api/auth/security/totp/setup/").status_code == 403
+    assert client.post("/api/auth/security/totp/confirm/", {"token": current_token(incomplete)}).status_code == 403
+    assert "_auth_user_id" not in client.session
+    assert TOTPDevice.objects.filter(pk=original.pk, confirmed=True).exists()
+    assert client.post("/api/auth/2fa/verify/", {"token": current_token(original)}).status_code == 200
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("enrolled", [False, True])
+def test_pending_password_change_cannot_skip_to_second_factor(client, enrolled):
+    from apps.accounts.tests import current_token
+
+    user = get_user_model().objects.create_superuser(username="password-bypass", password="test-password")
+    StaffProfile.objects.create(user=user, must_change_password=True)
+    device = TOTPDevice.objects.create(user=user, confirmed=enrolled)
+    response = client.post("/api/auth/login/", {"username": user.username, "password": "test-password"})
+    assert response.json()["data"]["next_step"] == "change_password"
+    assert client.post("/api/auth/security/totp/setup/").status_code == 403
+    assert client.post("/api/auth/security/totp/confirm/", {"token": current_token(device)}).status_code == 403
+    assert client.post("/api/auth/2fa/verify/", {"token": current_token(device)}).status_code == 403
+    assert "_auth_user_id" not in client.session
+
+
 @pytest.mark.django_db(transaction=True)
 def test_statistics_callback_failure_preserves_committed_issue_and_media(reporting, tmp_path):
     municipality, payload = reporting
