@@ -60,6 +60,12 @@ for (const width of [320, 768, 1440]) {
       payload.data.items.forEach((issue: { submitted_at: string }) => { issue.submitted_at = "2026-10-19T12:00:00Z"; });
       await route.fulfill({ response, json: payload });
     });
+    await page.route("**/api/municipalities/*/track/?*", async (route) => {
+      const response = await route.fetch();
+      const payload = await response.json();
+      payload.data.public_updates.forEach((update: { created_at: string }) => { update.created_at = "2026-11-03T12:00:00Z"; });
+      await route.fulfill({ response, json: payload });
+    });
     for (const [name, route] of routes) {
       await page.goto(route);
       await page.waitForLoadState("networkidle");
