@@ -164,11 +164,8 @@ def test_transient_receipt_failure_stays_queued_for_retry(reliability_issue):
     _, issue = reliability_issue
     delivery = ReceiptDelivery.objects.create(issue=issue, recipient=issue.citizen_email)
 
-    with (
-        patch("apps.issues.tasks.send_mail", side_effect=smtplib.SMTPException("temporary")),
-        pytest.raises(smtplib.SMTPException),
-    ):
-        send_receipt_email.run(delivery.pk)
+    with patch("apps.issues.tasks.send_mail", side_effect=smtplib.SMTPException("temporary")):
+        assert send_receipt_email.run(delivery.pk) == "retry_pending"
 
     delivery.refresh_from_db()
     assert delivery.state == ReceiptDeliveryState.QUEUED

@@ -1,4 +1,5 @@
 from django.contrib import messages
+from django.db import IntegrityError
 from django.db.models import Count, Prefetch
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, render
@@ -19,12 +20,15 @@ from apps.issues.public_updates import build_public_updates
 from apps.issues.services import (
     calculate_suspicious_assessment,
     consume_submission_rate_limit,
+    ensure_submission_cookie,
     get_client_ip,
     hash_client_value,
     normalize_tracking_code,
     public_status_label,
+    submission_client,
     tracking_code_matches,
 )
+from apps.issues.submissions import SubmissionConflict, existing_submission, submission_identity
 from apps.municipalities.models import Municipality
 from config.throttling import SharedThrottleUnavailable
 
@@ -71,10 +75,19 @@ def submit_issue(request, municipality_slug):
         form = CitizenIssueForm(request.POST, request.FILES, municipality=municipality)
         files = request.FILES.getlist("photos")
         form_is_valid = form.is_valid()
+        try:
+            submission_key, submission_digest = submission_identity(request, request.POST, files)
+            existing = existing_submission(municipality, submission_key, submission_digest)
+        except ValueError as exc:
+            form.add_error(None, str(exc))
+            form_is_valid = False
+            existing = None
+        if existing:
+            return render(request, "issues/public/report_success.html", {"issue": existing, "municipality": municipality})
         if form_is_valid:
             ip_hash = hash_client_value(get_client_ip(request))
             try:
-                allowed, rate_state = consume_submission_rate_limit(municipality, ip_hash)
+                allowed, rate_state = consume_submission_rate_limit(municipality, ip_hash, submission_client(request))
             except SharedThrottleUnavailable:
                 return HttpResponse(
                     "Заштитата е привремено недостапна. Обиди се повторно.",
@@ -113,7 +126,18 @@ def submit_issue(request, municipality_slug):
                         location_text=issue.location_text,
                     )
                 )
-                save_issue_with_attachments(issue, processed_images)
+                issue.submission_key = submission_key
+                issue.submission_digest = submission_digest
+                try:
+                    save_issue_with_attachments(issue, processed_images, send_receipt=form.cleaned_data.get("send_receipt", False))
+                except IntegrityError:
+                    try:
+                        existing = existing_submission(municipality, submission_key, submission_digest)
+                    except SubmissionConflict as exc:
+                        return HttpResponse(str(exc), status=409)
+                    if existing is None:
+                        raise
+                    issue = existing
                 return render(
                     request,
                     "issues/public/report_success.html",
@@ -122,11 +146,11 @@ def submit_issue(request, municipality_slug):
     else:
         form = CitizenIssueForm(municipality=municipality)
 
-    return render(
+    return ensure_submission_cookie(request, render(
         request,
         "issues/public/report_form.html",
         {"form": form, "municipality": municipality},
-    )
+    ))
 
 
 def track_issue(request, municipality_slug):

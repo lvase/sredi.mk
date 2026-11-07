@@ -71,11 +71,12 @@ def test_disabled_uploads_are_rejected_before_processing_or_saving(client, setti
 def test_json_report_and_receipt_work_without_multipart(client, pilot):
     municipality, payload = pilot
     payload.update(citizen_email="citizen@example.com", send_receipt="on")
-    with patch("apps.api.views.queue_receipt_delivery") as queue:
+    with patch("apps.issues.tasks.send_receipt_email.apply_async") as queue:
         response = client.post(submission_url(municipality, "api"), json.dumps(payload), content_type="application/json")
     assert response.status_code == 201
     assert response.json()["data"]["receipt_delivery"] == "queued"
-    queue.assert_called_once_with(Issue.objects.get())
+    queue.assert_not_called()
+    assert Issue.objects.get().receipt_deliveries.get().recipient == "citizen@example.com"
 
 
 def test_json_encoded_photo_payload_is_not_silently_accepted(client, pilot):

@@ -923,6 +923,11 @@ def test_superuser_can_create_staff_user(client):
         password="testpass",
     )
     client.force_login(superuser)
+    from django_otp.plugins.otp_totp.models import TOTPDevice
+    device = TOTPDevice.objects.create(user=superuser, confirmed=True)
+    session = client.session
+    session["otp_device_id"] = device.persistent_id
+    session.save()
 
     response = client.post(
         reverse("staff_create_user"),
@@ -1166,6 +1171,11 @@ def test_superuser_can_access_all_staff_issues(client):
         password="testpass",
     )
     client.force_login(superuser)
+    from django_otp.plugins.otp_totp.models import TOTPDevice
+    device = TOTPDevice.objects.create(user=superuser, confirmed=True)
+    session = client.session
+    session["otp_device_id"] = device.persistent_id
+    session.save()
 
     response = client.get(reverse("staff_issue_detail", args=[issue.pk]))
 

@@ -1,6 +1,7 @@
 import hashlib
 import ipaddress
 import logging
+import secrets
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -40,6 +41,7 @@ SENSITIVE_STATUS_NOTE_REQUIRED = {
 }
 MAX_SUBMISSIONS_PER_HOUR = settings.ISSUE_RATE_LIMIT_HOURLY
 MAX_SUBMISSIONS_PER_DAY = settings.ISSUE_RATE_LIMIT_DAILY
+SUBMISSION_COOKIE = "sredi_submission_client"
 audit_logger = logging.getLogger("apps.issues.audit")
 
 
@@ -213,9 +215,21 @@ def tracking_code_matches(issue, raw_code):
     )
 
 
-def consume_submission_rate_limit(municipality, ip_hash):
+def submission_client(request):
+    return request.get_signed_cookie(SUBMISSION_COOKIE, default=None, max_age=365 * 24 * 3600)
+
+
+def ensure_submission_cookie(request, response):
+    if not submission_client(request):
+        response.set_signed_cookie(SUBMISSION_COOKIE, secrets.token_urlsafe(24), max_age=365 * 24 * 3600,
+                                   secure=settings.SESSION_COOKIE_SECURE, httponly=True, samesite="Lax")
+    return response
+
+
+def consume_submission_rate_limit(municipality, ip_hash, client_identity=None):
     created_marker = getattr(municipality, "created_at", None)
-    identity = f"{municipality.pk}:{created_marker.timestamp() if created_marker else 0}:{ip_hash}"
+    network_identity = f"{municipality.pk}:{created_marker.timestamp() if created_marker else 0}:{ip_hash}"
+    identity = f"{municipality.pk}:client:{hash_client_value(client_identity)}" if client_identity else network_identity
     hour_count, hour_retry = increment_fixed_window("submission-hour", identity, 60 * 60)
     day_count, day_retry = increment_fixed_window("submission-day", identity, 24 * 60 * 60)
     allowed = hour_count <= MAX_SUBMISSIONS_PER_HOUR and day_count <= MAX_SUBMISSIONS_PER_DAY
@@ -224,6 +238,15 @@ def consume_submission_rate_limit(municipality, ip_hash):
         retry_waits.append(hour_retry)
     if day_count > MAX_SUBMISSIONS_PER_DAY:
         retry_waits.append(day_retry)
+    if client_identity:
+        network_hour, network_hour_retry = increment_fixed_window("submission-network-hour", network_identity, 3600)
+        network_day, network_day_retry = increment_fixed_window("submission-network-day", network_identity, 86400)
+        if network_hour > settings.ISSUE_NETWORK_RATE_LIMIT_HOURLY:
+            retry_waits.append(network_hour_retry)
+            allowed = False
+        if network_day > settings.ISSUE_NETWORK_RATE_LIMIT_DAILY:
+            retry_waits.append(network_day_retry)
+            allowed = False
     state = SubmissionRateState(
         hour_count=max(0, hour_count - 1),
         day_count=max(0, day_count - 1),

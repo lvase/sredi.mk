@@ -3,20 +3,19 @@ from django.contrib.auth import views as auth_views
 from django.urls import include, path
 from django.views.generic import RedirectView
 
-from apps.accounts.forms import BootstrapAuthenticationForm
+from apps.accounts.permissions import authentication_complete, frontend_login
 from config import health
 
 
 def superuser_admin_permission(request):
     return (
-        request.user.is_active
-        and request.user.is_superuser
-        and callable(getattr(request.user, "is_verified", None))
-        and request.user.is_verified()
+        request.user.is_superuser
+        and authentication_complete(request.user)
     )
 
 
 admin.site.has_permission = superuser_admin_permission
+admin.site.login = frontend_login
 
 urlpatterns = [
     path("health/live/", health.live, name="health_live"),
@@ -25,10 +24,7 @@ urlpatterns = [
     path("api/", include("apps.api.urls")),
     path(
         "login/",
-        auth_views.LoginView.as_view(
-            authentication_form=BootstrapAuthenticationForm,
-            template_name="registration/login.html",
-        ),
+        frontend_login,
         name="login",
     ),
     path("logout/", auth_views.LogoutView.as_view(), name="logout"),

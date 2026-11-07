@@ -28,6 +28,7 @@ class JSONFormatter(logging.Formatter):
             "issue_id",
             "issue_attachment_id",
             "receipt_delivery_id",
+            "queue_state",
             "original_size_bytes",
             "stored_size_bytes",
             "reduction_ratio",

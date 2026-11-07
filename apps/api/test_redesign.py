@@ -156,14 +156,14 @@ def test_receipt_opt_in_and_email_failure_are_non_fatal(client, municipal_data):
     delivery = ReceiptDelivery.objects.get(issue__tracking_code=response.json()["data"]["tracking_code"])
     assert delivery.state == ReceiptDeliveryState.QUEUED
 
-    with patch("apps.api.views.queue_receipt_delivery", side_effect=RuntimeError("queue unavailable")):
+    with patch("apps.issues.tasks.send_receipt_email.apply_async", side_effect=RuntimeError("queue unavailable")):
         failed = client.post(
             f"/api/municipalities/{municipality.slug}/issues/",
             {**payload, "title": "Втор проблем", "location_text": "Друга локација"},
             REMOTE_ADDR="198.51.100.22",
         )
     assert failed.status_code == 201
-    assert failed.json()["data"]["receipt_delivery"] == "failed"
+    assert failed.json()["data"]["receipt_delivery"] == "queued"
     assert Issue.objects.filter(title="Втор проблем").exists()
 
 

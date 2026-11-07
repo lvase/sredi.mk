@@ -20,23 +20,51 @@ async function fillReport(page: Page, prefix: string) {
   await page.locator('input[name="consent"]').check();
 }
 
-test("citizen can submit a text-only report and open tracking", async ({ page }) => {
+test("citizen safely retries a lost response, reloads the receipt, and opens tracking", async ({ page }) => {
   await page.goto("/konce/prijavi");
   await expect(page.getByText(/Намерно лажни, измамнички или манипулирани пријави/)).toBeVisible();
   await fillReport(page, "E2E јавна");
   await expect(page.locator('input[type="file"]')).toHaveCount(0);
   await expect(page.getByText("Додај фотографии")).toHaveCount(0);
   await expect(page.getByRole("alert", { name: "Провери ги означените полиња" })).toHaveCount(0);
+  let originalCode = "";
+  let originalKey = "";
+  await page.route("**/api/municipalities/konce/issues/", async (route) => {
+    originalKey = route.request().postDataJSON().submission_key;
+    const accepted = await route.fetch();
+    expect(accepted.status()).toBe(201);
+    originalCode = (await accepted.json()).data.tracking_code;
+    await route.abort("failed");
+  }, { times: 1 });
   const submitted = page.waitForRequest((request) => request.method() === "POST" && request.url().endsWith("/api/municipalities/konce/issues/"));
   await page.getByRole("button", { name: "Испрати пријава" }).click();
   const request = await submitted;
   expect(request.headers()["content-type"]).toContain("application/json");
   expect(request.postDataJSON()).not.toHaveProperty("photos");
+  await expect(page.getByText(/Не добивме потврда/)).toBeVisible();
+  const retry = page.waitForRequest((request) => request.method() === "POST" && request.url().endsWith("/api/municipalities/konce/issues/"));
+  await page.getByRole("button", { name: "Испрати пријава" }).click();
+  expect((await retry).postDataJSON().submission_key).toBe(originalKey);
+  await expect(page.locator(".font-mono")).toHaveText(originalCode);
   await expect(page.getByRole("heading", { name: "Пријавата е примена" })).toBeVisible();
   const code = await page.locator(".font-mono").innerText();
   expect(code.length).toBeGreaterThan(5);
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Пријавата е примена" })).toBeVisible();
+  await expect(page.locator(".font-mono")).toHaveText(code);
   await page.getByRole("link", { name: "Провери статус" }).click();
   await expect(page).toHaveURL(new RegExp(`/konce/sledi\\?code=${code}`));
+});
+
+test("proxy Retry-After header disables submission during cooldown", async ({ page }) => {
+  await page.goto("/konce/prijavi");
+  await fillReport(page, "E2E proxy");
+  await page.route("**/api/municipalities/konce/issues/", (route) => route.fulfill({
+    status: 429, headers: { "Retry-After": "60", "Content-Type": "application/json" },
+    body: JSON.stringify({ message: "Почекајте пред повторно испраќање." })
+  }));
+  await page.getByRole("button", { name: "Испрати пријава" }).click();
+  await expect(page.getByRole("button", { name: /Почекај/ })).toBeDisabled();
 });
 
 test("pilot rejects photo uploads sent directly to the API", async ({ page }) => {

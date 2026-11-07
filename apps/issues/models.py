@@ -2,9 +2,10 @@ import secrets
 from pathlib import Path
 
 from django.conf import settings
-from django.contrib.postgres.indexes import GinIndex
+from django.contrib.postgres.indexes import GinIndex, OpClass
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models.functions import Upper
 from django.utils import timezone
 
 from apps.municipalities.models import Department, Municipality, Settlement
@@ -108,6 +109,8 @@ class Issue(models.Model):
         max_length=20, choices=IssuePriority.choices, default=IssuePriority.NORMAL
     )
     tracking_code = models.CharField(max_length=16, unique=True, editable=False)
+    submission_key = models.UUIDField(null=True, blank=True, editable=False)
+    submission_digest = models.CharField(max_length=64, blank=True, editable=False)
 
     citizen_name = models.CharField(max_length=160, blank=True)
     citizen_email = models.EmailField(blank=True)
@@ -156,6 +159,9 @@ class Issue(models.Model):
 
     class Meta:
         ordering = ["-submitted_at"]
+        constraints = [models.UniqueConstraint(
+            fields=["municipality", "submission_key"], name="unique_municipal_submission"
+        )]
         indexes = [
             models.Index(fields=["municipality", "status"]),
             models.Index(fields=["settlement", "status"]),
@@ -185,11 +191,10 @@ class Issue(models.Model):
                 fields=["attachment_retention_started_at"],
                 name="iss_retention_start_idx",
             ),
-            GinIndex(fields=["title"], name="iss_title_trgm_idx", opclasses=["gin_trgm_ops"]),
+            GinIndex(OpClass(Upper("title"), name="gin_trgm_ops"), name="iss_upper_title_trgm_idx"),
             GinIndex(
-                fields=["location_text"],
-                name="iss_location_trgm_idx",
-                opclasses=["gin_trgm_ops"],
+                OpClass(Upper("location_text"), name="gin_trgm_ops"),
+                name="iss_upper_location_trgm_idx",
             ),
         ]
 
@@ -400,6 +405,9 @@ class ReceiptDelivery(models.Model):
     sent_at = models.DateTimeField(null=True, blank=True)
     failed_at = models.DateTimeField(null=True, blank=True)
     last_error = models.CharField(max_length=500, blank=True)
+    next_attempt_at = models.DateTimeField(default=timezone.now, db_index=True)
+    dispatched_at = models.DateTimeField(null=True, blank=True)
+    lease_until = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         indexes = [models.Index(fields=["state", "queued_at"], name="receipt_state_queue_idx")]

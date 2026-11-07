@@ -24,6 +24,7 @@
     <form method="post" enctype="multipart/form-data" class="vstack gap-4">
       {% csrf_token %}
       {{ form.website }}
+      {{ form.submission_key }}
       {% if form.non_field_errors %}
         <div class="alert alert-danger">{{ form.non_field_errors }}</div>
       {% endif %}

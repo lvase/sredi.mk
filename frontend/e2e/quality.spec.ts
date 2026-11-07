@@ -44,6 +44,28 @@ test("public statistics expose only moderated titles", async ({ page }) => {
 for (const width of [320, 768, 1440]) {
   test(`responsive visual baselines at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: width === 320 ? 720 : 900 });
+    // Mask rectangles still change width with the real date/time. Keep only these
+    // displayed timestamps fixed; all statistics and moderation data stay real.
+    await page.route("**/api/municipalities/*/statistics/?*", async (route) => {
+      const response = await route.fetch();
+      const payload = await response.json();
+      const timestamp = "2026-10-19T12:00:00Z";
+      if (payload.data.last_updated) payload.data.last_updated = timestamp;
+      payload.data.recent_reports.forEach((report: { submitted_at: string }) => { report.submitted_at = timestamp; });
+      await route.fulfill({ response, json: payload });
+    });
+    await page.route("**/api/staff/issues/?*", async (route) => {
+      const response = await route.fetch();
+      const payload = await response.json();
+      payload.data.items.forEach((issue: { submitted_at: string }) => { issue.submitted_at = "2026-10-19T12:00:00Z"; });
+      await route.fulfill({ response, json: payload });
+    });
+    await page.route("**/api/municipalities/*/track/?*", async (route) => {
+      const response = await route.fetch();
+      const payload = await response.json();
+      payload.data.public_updates.forEach((update: { created_at: string }) => { update.created_at = "2026-11-03T12:00:00Z"; });
+      await route.fulfill({ response, json: payload });
+    });
     for (const [name, route] of routes) {
       await page.goto(route);
       await page.waitForLoadState("networkidle");

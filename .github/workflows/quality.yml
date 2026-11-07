@@ -5,6 +5,16 @@ on:
   pull_request:
 
 jobs:
+  production-startup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check backup and certificate failure handling
+        run: python3 scripts/test_operations.py
+      - name: Check production configuration and isolated startup
+        run: python3 scripts/test_production_startup.py --smoke
+
   backend:
     runs-on: ubuntu-latest
     services:

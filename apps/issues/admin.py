@@ -1,7 +1,9 @@
 import csv
 
 from django.contrib import admin
+from django.db import transaction
 from django.http import HttpResponse
+from django.utils import timezone
 
 from apps.issues.models import (
     AuditLog,
@@ -11,9 +13,36 @@ from apps.issues.models import (
     IssueCategory,
     IssueComment,
     IssueDuplicateLink,
-    ResponseTarget,
     IssueStatusEvent,
+    ReceiptDelivery,
+    ResponseTarget,
 )
+
+
+@admin.action(description="Повторно испрати избрани неуспешни потврди")
+def retry_failed_receipts(modeladmin, request, queryset):
+    with transaction.atomic():
+        updated = queryset.filter(state="failed").exclude(recipient="").update(
+            state="queued", attempt_count=0, next_attempt_at=timezone.now(),
+            dispatched_at=None, lease_until=None, failed_at=None, last_error="",
+        )
+        AuditLog.objects.create(actor=request.user, action="receipt_deliveries_requeued",
+                                object_type="ReceiptDelivery", metadata={"count": updated})
+    modeladmin.message_user(request, f"Потврди ставени во редица: {updated}")
+
+
+@admin.register(ReceiptDelivery)
+class ReceiptDeliveryAdmin(admin.ModelAdmin):
+    list_display = ["id", "issue", "state", "attempt_count", "queued_at", "last_attempt_at", "last_error"]
+    list_filter = ["state"]
+    actions = [retry_failed_receipts]
+    readonly_fields = [field.name for field in ReceiptDelivery._meta.fields]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.action(description="Export selected issues as CSV")
